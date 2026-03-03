@@ -80,6 +80,13 @@ def turning_angle(dir_from: int, dir_to: int) -> float:
     return steps * 45.0
 
 
+# Pre-computed turning angle lookup table for O(1) access in the inner loop.
+_TURN_ANGLE_LUT: List[List[float]] = [
+    [turning_angle(d_in, d_out) for d_out in range(8)]
+    for d_in in range(8)
+]
+
+
 # ---------------------------------------------------------------------------
 # Core algorithm
 # ---------------------------------------------------------------------------
@@ -249,6 +256,15 @@ def _cost_scale(cost_raster: np.ndarray) -> float:
     return mean_val if mean_val > 0 else 1.0
 
 
+def _min_cost(cost_raster: np.ndarray) -> float:
+    """Return the minimum finite, non-negative value in the raster."""
+    valid = cost_raster[np.isfinite(cost_raster)]
+    valid = valid[valid >= 0]
+    if valid.size == 0:
+        return 0.0
+    return float(np.min(valid))
+
+
 # ---------------------------------------------------------------------------
 # Standard Dijkstra (no direction tracking)
 # ---------------------------------------------------------------------------
@@ -269,42 +285,64 @@ def _dijkstra_standard(
     scale = _cost_scale(cost_raster)
     dist_weight = distance_factor * scale
 
+    # A* heuristic weight: admissible lower-bound cost per unit distance.
+    cy, cx = cell_size
+    h_weight = _min_cost(cost_raster) + dist_weight
+
+    idx_dtype = np.int16 if max(rows, cols) <= 32767 else np.int32
+
     best = np.full((rows, cols), np.inf)
     best[sr, sc] = 0.0
-    parent: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {start: None}
+    # Use numpy arrays instead of a Python dict for memory efficiency.
+    parent_r = np.full((rows, cols), -1, dtype=idx_dtype)
+    parent_c = np.full((rows, cols), -1, dtype=idx_dtype)
 
-    # counter prevents comparison of tuples when costs are equal
+    # Convert cost raster to Python lists for faster scalar access.
+    cost_list = cost_raster.tolist()
+    # Local references to avoid repeated attribute lookups.
+    _heappop = heapq.heappop
+    _heappush = heapq.heappush
+    _sqrt = math.sqrt
+    _isfinite = math.isfinite
+    _inf = float("inf")
+    _dirs = DIRECTIONS
+
+    # Heap entries: (f, counter, g, r, c) where f = g + h.
+    # Storing g explicitly avoids floating-point error from f - h.
     counter = 0
-    pq: List = [(0.0, counter, sr, sc)]
+    h_start = _sqrt(((sr - er) * cy) ** 2 + ((sc - ec) * cx) ** 2) * h_weight
+    pq: List = [(h_start, counter, 0.0, sr, sc)]
 
     while pq:
-        cost, _, r, c = heapq.heappop(pq)
-        if cost > best[r, c]:
+        _, _, g, r, c = _heappop(pq)
+        if g > best[r, c]:
             continue
         if r == er and c == ec:
             break
 
         for d in range(NUM_DIRS):
-            dr, dc = DIRECTIONS[d]
+            dr, dc = _dirs[d]
             nr, nc = r + dr, c + dc
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
-            cell_val = cost_raster[nr, nc]
-            if not np.isfinite(cell_val) or cell_val < 0:
+            cell_val = cost_list[nr][nc]
+            if not _isfinite(cell_val) or cell_val < 0:
                 continue
             sd = step_dists[d]
-            step_cost = cell_val * sd + dist_weight * sd
-            new_cost = cost + step_cost
+            new_cost = g + cell_val * sd + dist_weight * sd
             if new_cost < best[nr, nc]:
                 best[nr, nc] = new_cost
-                parent[(nr, nc)] = (r, c)
+                parent_r[nr, nc] = r
+                parent_c[nr, nc] = c
                 counter += 1
-                heapq.heappush(pq, (new_cost, counter, nr, nc))
+                h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
+                _heappush(pq, (new_cost + h_nb, counter, new_cost, nr, nc))
 
     if not np.isfinite(best[er, ec]):
         raise RuntimeError("No path found between start and end")
 
-    return _build_result(parent, start, end, best[er, ec], cell_size)
+    return _build_result(parent_r, parent_c, start, end,
+                         best[er, ec], cell_size)
 
 
 # ---------------------------------------------------------------------------
@@ -329,8 +367,15 @@ def _dijkstra_with_direction(
     scale = _cost_scale(cost_raster)
     curv_weight = curvature_factor * _CURVATURE_AMPLIFIER * scale
     dist_weight = distance_factor * scale
+    straight_weight = _STRAIGHTNESS_PENALTY * scale
     # Maximum deflection angle allowed, derived from the minimum interior angle.
     max_allowed_deflection = 180.0 - min_turning_angle
+
+    # A* heuristic weight: admissible lower-bound cost per unit distance.
+    cy, cx = cell_size
+    h_weight = _min_cost(cost_raster) + dist_weight
+
+    idx_dtype = np.int16 if max(rows, cols) <= 32767 else np.int32
 
     # best_cost shape: (rows, cols, NUM_DIRS + 1)
     # Index NUM_DIRS stores the NO_DIR sentinel for the start cell.
@@ -338,22 +383,37 @@ def _dijkstra_with_direction(
     best = np.full((rows, cols, n_states), np.inf)
     best[sr, sc, NUM_DIRS] = 0.0  # start with NO_DIR
 
-    # Parent map: (r, c, d) -> (pr, pc, pd) or None
-    parent: Dict[Tuple[int, int, int], Optional[Tuple[int, int, int]]] = {
-        (sr, sc, NO_DIR): None,
-    }
+    # Use numpy arrays instead of a Python dict for memory efficiency.
+    parent_r = np.full((rows, cols, n_states), -1, dtype=idx_dtype)
+    parent_c = np.full((rows, cols, n_states), -1, dtype=idx_dtype)
+    parent_d = np.full((rows, cols, n_states), -1, dtype=np.int8)
 
+    # Convert cost raster to Python lists for faster scalar access.
+    cost_list = cost_raster.tolist()
+    # Local references to avoid repeated attribute lookups.
+    _heappop = heapq.heappop
+    _heappush = heapq.heappush
+    _sqrt = math.sqrt
+    _isfinite = math.isfinite
+    _dirs = DIRECTIONS
+    _turn_lut = _TURN_ANGLE_LUT
+    _no_dir = NO_DIR
+    _curv_div = curv_weight / 180.0
+
+    # Heap entries: (f, counter, g, r, c, d_in) where f = g + h.
+    # Storing g explicitly avoids floating-point error from f - h.
     counter = 0
-    pq: List = [(0.0, counter, sr, sc, NO_DIR)]
+    h_start = _sqrt(((sr - er) * cy) ** 2 + ((sc - ec) * cx) ** 2) * h_weight
+    pq: List = [(h_start, counter, 0.0, sr, sc, _no_dir)]
 
     found = False
     end_state: Optional[Tuple[int, int, int]] = None
 
     while pq:
-        cost, _, r, c, d_in = heapq.heappop(pq)
+        _, _, g, r, c, d_in = _heappop(pq)
         d_idx = d_in if d_in >= 0 else NUM_DIRS
 
-        if cost > best[r, c, d_idx]:
+        if g > best[r, c, d_idx]:
             continue
         if r == er and c == ec:
             found = True
@@ -361,12 +421,12 @@ def _dijkstra_with_direction(
             break
 
         for d_out in range(NUM_DIRS):
-            dr, dc = DIRECTIONS[d_out]
+            dr, dc = _dirs[d_out]
             nr, nc = r + dr, c + dc
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
-            cell_val = cost_raster[nr, nc]
-            if not np.isfinite(cell_val) or cell_val < 0:
+            cell_val = cost_list[nr][nc]
+            if not _isfinite(cell_val) or cell_val < 0:
                 continue
 
             sd = step_dists[d_out]
@@ -374,41 +434,43 @@ def _dijkstra_with_direction(
 
             # Curvature penalty and hard turn constraint
             curv_penalty = 0.0
-            if d_in != NO_DIR:
-                angle = turning_angle(d_in, d_out)
+            if d_in != _no_dir:
+                angle = _turn_lut[d_in][d_out]
                 if angle > max_allowed_deflection:
                     continue
-                curv_penalty = curv_weight * (angle / 180.0) * sd
+                curv_penalty = _curv_div * angle * sd
 
             # Anti-zigzag: penalize direction changes when cost variation
             # is low (going straight would cost about the same).
             straightness_penalty = 0.0
-            if d_in != NO_DIR and d_out != d_in:
-                str_dr, str_dc = DIRECTIONS[d_in]
+            if d_in != _no_dir and d_out != d_in:
+                str_dr, str_dc = _dirs[d_in]
                 str_r, str_c = r + str_dr, c + str_dc
-                if (0 <= str_r < rows and 0 <= str_c < cols
-                        and np.isfinite(cost_raster[str_r, str_c])
-                        and cost_raster[str_r, str_c] >= 0):
-                    cost_ratio = abs(cell_val - cost_raster[str_r, str_c]) / scale
-                    similarity = max(0.0, 1.0 - cost_ratio)
-                else:
-                    similarity = 0.0
-                straightness_penalty = similarity * _STRAIGHTNESS_PENALTY * scale * sd
+                if (0 <= str_r < rows and 0 <= str_c < cols):
+                    str_val = cost_list[str_r][str_c]
+                    if _isfinite(str_val) and str_val >= 0:
+                        cost_ratio = abs(cell_val - str_val) / scale
+                        similarity = 1.0 - cost_ratio
+                        if similarity > 0.0:
+                            straightness_penalty = similarity * straight_weight * sd
 
-            dist_penalty = dist_weight * sd
-            new_cost = cost + base + curv_penalty + straightness_penalty + dist_penalty
+            new_cost = g + base + curv_penalty + straightness_penalty + dist_weight * sd
 
             nd_idx = d_out
             if new_cost < best[nr, nc, nd_idx]:
                 best[nr, nc, nd_idx] = new_cost
-                parent[(nr, nc, d_out)] = (r, c, d_in)
+                parent_r[nr, nc, nd_idx] = r
+                parent_c[nr, nc, nd_idx] = c
+                parent_d[nr, nc, nd_idx] = d_in
                 counter += 1
-                heapq.heappush(pq, (new_cost, counter, nr, nc, d_out))
+                h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
+                _heappush(pq, (new_cost + h_nb, counter, new_cost, nr, nc, d_out))
 
     if not found:
         raise RuntimeError("No path found between start and end")
 
-    return _build_result_directed(parent, end_state, best, cell_size)
+    return _build_result_directed(parent_r, parent_c, parent_d,
+                                  end_state, best, cell_size)
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +479,8 @@ def _dijkstra_with_direction(
 
 
 def _build_result(
-    parent: Dict,
+    parent_r: np.ndarray,
+    parent_c: np.ndarray,
     start: Tuple[int, int],
     end: Tuple[int, int],
     total_cost: float,
@@ -425,10 +488,11 @@ def _build_result(
 ) -> Dict:
     """Reconstruct path for the standard (non-directional) Dijkstra."""
     path: List[Tuple[int, int]] = []
-    cur: Optional[Tuple[int, int]] = end
-    while cur is not None:
-        path.append(cur)
-        cur = parent.get(cur)
+    r, c = end
+    while r >= 0:
+        path.append((int(r), int(c)))
+        pr, pc = int(parent_r[r, c]), int(parent_c[r, c])
+        r, c = pr, pc
     path.reverse()
 
     cy, cx = cell_size
@@ -456,17 +520,24 @@ def _build_result(
 
 
 def _build_result_directed(
-    parent: Dict,
+    parent_r: np.ndarray,
+    parent_c: np.ndarray,
+    parent_d: np.ndarray,
     end_state: Tuple[int, int, int],
     best: np.ndarray,
     cell_size: Tuple[float, float],
 ) -> Dict:
     """Reconstruct path for the direction-aware Dijkstra."""
     states: List[Tuple[int, int, int]] = []
-    cur: Optional[Tuple[int, int, int]] = end_state
-    while cur is not None:
-        states.append(cur)
-        cur = parent.get(cur)
+    r, c, d = end_state
+    d_idx = d if d >= 0 else NUM_DIRS
+    while r >= 0:
+        states.append((int(r), int(c), int(d)))
+        new_r = int(parent_r[r, c, d_idx])
+        new_c = int(parent_c[r, c, d_idx])
+        new_d = int(parent_d[r, c, d_idx])
+        d_idx = new_d if new_d >= 0 else NUM_DIRS
+        r, c, d = new_r, new_c, new_d
     states.reverse()
 
     path = [(r, c) for r, c, _ in states]

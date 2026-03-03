@@ -365,3 +365,28 @@ class TestSmoothing:
         sp = result["smoothed_path"]
         assert sp[0] == (0.0, 0.0)
         assert sp[-1] == (4.0, 4.0)
+
+
+# ---------------------------------------------------------------------------
+# Scalability
+# ---------------------------------------------------------------------------
+
+
+class TestScalability:
+    """Verify the algorithm works on moderately large rasters."""
+
+    def test_moderate_raster_with_curvature(self):
+        """Direction-aware A* on a 200×200 raster should complete quickly."""
+        rng = np.random.default_rng(42)
+        raster = rng.uniform(1, 10, (200, 200))
+        result = enhanced_least_cost_path(
+            raster, (10, 10), (190, 190),
+            curvature_factor=0.5,
+            min_turning_angle=90.0,
+            distance_factor=0.3,
+        )
+        assert result["path"][0] == (10, 10)
+        assert result["path"][-1] == (190, 190)
+        assert result["total_cost"] > 0
+        for angle in result["turning_angles"]:
+            assert angle <= 90.0 + 1e-9
