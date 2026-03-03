@@ -378,7 +378,8 @@ def _dijkstra_with_direction(
     # position is derived from the current cell's own arrival direction:
     #   parent = (r - DIRECTIONS[d_idx][0], c - DIRECTIONS[d_idx][1])
     # This eliminates two large int16/int32 3-D arrays.
-    parent_d = np.full((rows, cols, n_states), -2, dtype=np.int8)
+    # Sentinel -1 means "no parent" (unvisited or start cell).
+    parent_d = np.full((rows, cols, n_states), -1, dtype=np.int8)
 
     # Local references to avoid repeated attribute lookups.
     _heappop = heapq.heappop
@@ -473,7 +474,9 @@ def _build_result(
     """Reconstruct path for the standard (non-directional) Dijkstra."""
     path: List[Tuple[int, int]] = []
     r, c = end
-    sr, sc = start
+    # Trace from end to start.  Each cell is appended, then we check
+    # its parent direction.  The start cell has parent_dir == -1 (no
+    # parent), so the loop terminates after appending the start cell.
     while True:
         path.append((int(r), int(c)))
         d = int(parent_dir[r, c])
