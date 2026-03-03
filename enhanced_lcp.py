@@ -289,22 +289,17 @@ def _dijkstra_standard(
     cy, cx = cell_size
     h_weight = _min_cost(cost_raster) + dist_weight
 
-    idx_dtype = np.int16 if max(rows, cols) <= 32767 else np.int32
-
     best = np.full((rows, cols), np.inf)
     best[sr, sc] = 0.0
-    # Use numpy arrays instead of a Python dict for memory efficiency.
-    parent_r = np.full((rows, cols), -1, dtype=idx_dtype)
-    parent_c = np.full((rows, cols), -1, dtype=idx_dtype)
+    # Store only the arrival direction (int8) instead of parent row/col.
+    # Parent cell is derived: parent = (r - DIRECTIONS[d][0], c - DIRECTIONS[d][1]).
+    parent_dir = np.full((rows, cols), -1, dtype=np.int8)
 
-    # Convert cost raster to Python lists for faster scalar access.
-    cost_list = cost_raster.tolist()
     # Local references to avoid repeated attribute lookups.
     _heappop = heapq.heappop
     _heappush = heapq.heappush
     _sqrt = math.sqrt
     _isfinite = math.isfinite
-    _inf = float("inf")
     _dirs = DIRECTIONS
 
     # Heap entries: (f, counter, g, r, c) where f = g + h.
@@ -325,15 +320,14 @@ def _dijkstra_standard(
             nr, nc = r + dr, c + dc
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
-            cell_val = cost_list[nr][nc]
+            cell_val = float(cost_raster[nr, nc])
             if not _isfinite(cell_val) or cell_val < 0:
                 continue
             sd = step_dists[d]
             new_cost = g + cell_val * sd + dist_weight * sd
             if new_cost < best[nr, nc]:
                 best[nr, nc] = new_cost
-                parent_r[nr, nc] = r
-                parent_c[nr, nc] = c
+                parent_dir[nr, nc] = d
                 counter += 1
                 h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
                 _heappush(pq, (new_cost + h_nb, counter, new_cost, nr, nc))
@@ -341,8 +335,7 @@ def _dijkstra_standard(
     if not np.isfinite(best[er, ec]):
         raise RuntimeError("No path found between start and end")
 
-    return _build_result(parent_r, parent_c, start, end,
-                         best[er, ec], cell_size)
+    return _build_result(parent_dir, start, end, best[er, ec], cell_size)
 
 
 # ---------------------------------------------------------------------------
@@ -375,21 +368,18 @@ def _dijkstra_with_direction(
     cy, cx = cell_size
     h_weight = _min_cost(cost_raster) + dist_weight
 
-    idx_dtype = np.int16 if max(rows, cols) <= 32767 else np.int32
-
     # best_cost shape: (rows, cols, NUM_DIRS + 1)
     # Index NUM_DIRS stores the NO_DIR sentinel for the start cell.
     n_states = NUM_DIRS + 1
     best = np.full((rows, cols, n_states), np.inf)
     best[sr, sc, NUM_DIRS] = 0.0  # start with NO_DIR
 
-    # Use numpy arrays instead of a Python dict for memory efficiency.
-    parent_r = np.full((rows, cols, n_states), -1, dtype=idx_dtype)
-    parent_c = np.full((rows, cols, n_states), -1, dtype=idx_dtype)
-    parent_d = np.full((rows, cols, n_states), -1, dtype=np.int8)
+    # Store only the parent's arrival direction (int8).  Parent cell
+    # position is derived from the current cell's own arrival direction:
+    #   parent = (r - DIRECTIONS[d_idx][0], c - DIRECTIONS[d_idx][1])
+    # This eliminates two large int16/int32 3-D arrays.
+    parent_d = np.full((rows, cols, n_states), -2, dtype=np.int8)
 
-    # Convert cost raster to Python lists for faster scalar access.
-    cost_list = cost_raster.tolist()
     # Local references to avoid repeated attribute lookups.
     _heappop = heapq.heappop
     _heappush = heapq.heappush
@@ -425,7 +415,7 @@ def _dijkstra_with_direction(
             nr, nc = r + dr, c + dc
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
-            cell_val = cost_list[nr][nc]
+            cell_val = float(cost_raster[nr, nc])
             if not _isfinite(cell_val) or cell_val < 0:
                 continue
 
@@ -447,7 +437,7 @@ def _dijkstra_with_direction(
                 str_dr, str_dc = _dirs[d_in]
                 str_r, str_c = r + str_dr, c + str_dc
                 if (0 <= str_r < rows and 0 <= str_c < cols):
-                    str_val = cost_list[str_r][str_c]
+                    str_val = float(cost_raster[str_r, str_c])
                     if _isfinite(str_val) and str_val >= 0:
                         similarity = max(0.0, 1.0 - abs(cell_val - str_val) / scale)
                         straightness_penalty = similarity * straight_weight * sd
@@ -457,8 +447,6 @@ def _dijkstra_with_direction(
             nd_idx = d_out
             if new_cost < best[nr, nc, nd_idx]:
                 best[nr, nc, nd_idx] = new_cost
-                parent_r[nr, nc, nd_idx] = r
-                parent_c[nr, nc, nd_idx] = c
                 parent_d[nr, nc, nd_idx] = d_in
                 counter += 1
                 h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
@@ -467,8 +455,7 @@ def _dijkstra_with_direction(
     if not found:
         raise RuntimeError("No path found between start and end")
 
-    return _build_result_directed(parent_r, parent_c, parent_d,
-                                  end_state, best, cell_size)
+    return _build_result_directed(parent_d, end_state, best, cell_size)
 
 
 # ---------------------------------------------------------------------------
@@ -477,8 +464,7 @@ def _dijkstra_with_direction(
 
 
 def _build_result(
-    parent_r: np.ndarray,
-    parent_c: np.ndarray,
+    parent_dir: np.ndarray,
     start: Tuple[int, int],
     end: Tuple[int, int],
     total_cost: float,
@@ -487,9 +473,14 @@ def _build_result(
     """Reconstruct path for the standard (non-directional) Dijkstra."""
     path: List[Tuple[int, int]] = []
     r, c = end
-    while r >= 0:
+    sr, sc = start
+    while True:
         path.append((int(r), int(c)))
-        r, c = parent_r[r, c], parent_c[r, c]
+        d = int(parent_dir[r, c])
+        if d < 0:
+            break  # Start cell reached (parent_dir == -1)
+        r = r - DIRECTIONS[d][0]
+        c = c - DIRECTIONS[d][1]
     path.reverse()
 
     cy, cx = cell_size
@@ -517,23 +508,31 @@ def _build_result(
 
 
 def _build_result_directed(
-    parent_r: np.ndarray,
-    parent_c: np.ndarray,
     parent_d: np.ndarray,
     end_state: Tuple[int, int, int],
     best: np.ndarray,
     cell_size: Tuple[float, float],
 ) -> Dict:
-    """Reconstruct path for the direction-aware Dijkstra."""
+    """Reconstruct path for the direction-aware Dijkstra.
+
+    Parent cell position is derived from the arrival direction index:
+    ``parent = (r - DIRECTIONS[d_idx][0], c - DIRECTIONS[d_idx][1])``.
+    Only ``parent_d`` (the parent's arrival direction) is stored.
+    """
     states: List[Tuple[int, int, int]] = []
     r, c, d = end_state
     d_idx = d if d >= 0 else NUM_DIRS
-    while r >= 0:
+    while True:
         states.append((int(r), int(c), int(d)))
-        nr, nc = parent_r[r, c, d_idx], parent_c[r, c, d_idx]
+        if d_idx >= NUM_DIRS:
+            # Start cell (arrived with NO_DIR), stop.
+            break
         nd = int(parent_d[r, c, d_idx])
+        # The parent cell is one step back from the arrival direction.
+        pr = r - DIRECTIONS[d_idx][0]
+        pc = c - DIRECTIONS[d_idx][1]
         d_idx = nd if nd >= 0 else NUM_DIRS
-        r, c, d = nr, nc, nd
+        r, c, d = pr, pc, nd
     states.reverse()
 
     path = [(r, c) for r, c, _ in states]
