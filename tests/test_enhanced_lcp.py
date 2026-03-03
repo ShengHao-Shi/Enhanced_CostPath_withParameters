@@ -308,6 +308,8 @@ class TestStraightness:
         straight rather than zigzagging to slightly cheaper cells."""
         rng = np.random.default_rng(123)
         raster = 5.0 + rng.uniform(-0.1, 0.1, (12, 12))
+        # Verify the raster actually has low variation
+        assert np.ptp(raster) < 0.5
         start, end = (0, 0), (11, 11)
         result = enhanced_least_cost_path(
             raster, start, end, curvature_factor=0.5,

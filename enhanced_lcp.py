@@ -155,7 +155,7 @@ def enhanced_least_cost_path(
         base_cost        = cost_raster[B] * step_distance
         curvature_penalty = curvature_factor * amplifier
                             * (turning_angle / 180) * step_distance * cost_scale
-        straightness_pen  = similarity * penalty * cost_scale * step_distance
+        straightness_penalty = similarity * penalty * cost_scale * step_distance
         distance_penalty  = distance_factor * step_distance * cost_scale
 
         total_step_cost  = base_cost + curvature_penalty
@@ -329,8 +329,8 @@ def _dijkstra_with_direction(
     scale = _cost_scale(cost_raster)
     curv_weight = curvature_factor * _CURVATURE_AMPLIFIER * scale
     dist_weight = distance_factor * scale
-    # Maximum deflection allowed, derived from the minimum interior angle.
-    max_deflection = 180.0 - min_turning_angle
+    # Maximum deflection angle allowed, derived from the minimum interior angle.
+    max_allowed_deflection = 180.0 - min_turning_angle
 
     # best_cost shape: (rows, cols, NUM_DIRS + 1)
     # Index NUM_DIRS stores the NO_DIR sentinel for the start cell.
@@ -376,7 +376,7 @@ def _dijkstra_with_direction(
             curv_penalty = 0.0
             if d_in != NO_DIR:
                 angle = turning_angle(d_in, d_out)
-                if angle > max_deflection:
+                if angle > max_allowed_deflection:
                     continue
                 curv_penalty = curv_weight * (angle / 180.0) * sd
 
