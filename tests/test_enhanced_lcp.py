@@ -204,8 +204,8 @@ class TestCurvatureFactor:
         res_hi_curv = enhanced_least_cost_path(
             raster, start, end, curvature_factor=0.8,
         )
-        max_angle_no = max(res_no_curv["turning_angles"]) if res_no_curv["turning_angles"] else 0
-        max_angle_hi = max(res_hi_curv["turning_angles"]) if res_hi_curv["turning_angles"] else 0
+        max_angle_no = max(res_no_curv["turning_angles"], default=0)
+        max_angle_hi = max(res_hi_curv["turning_angles"], default=0)
         assert max_angle_hi <= max_angle_no
 
     def test_max_turning_angle_constraint(self):

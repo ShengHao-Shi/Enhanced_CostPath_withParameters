@@ -477,7 +477,7 @@ def load_cost_raster(filepath: str) -> Tuple[np.ndarray, Dict]:
         ``crs``, ``cell_size``, ``nodata``, ``width``, and ``height``.
     """
     try:
-        import rasterio  # noqa: F811
+        import rasterio
     except ImportError as exc:
         raise ImportError(
             "rasterio is required for file I/O.  Install it with: "
@@ -519,8 +519,7 @@ def save_path_raster(
         Metadata dict returned by :func:`load_cost_raster`.
     """
     try:
-        import rasterio  # noqa: F811
-        from rasterio.transform import Affine  # noqa: F401
+        import rasterio
     except ImportError as exc:
         raise ImportError(
             "rasterio is required for file I/O.  Install it with: "
