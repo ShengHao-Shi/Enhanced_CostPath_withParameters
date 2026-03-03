@@ -7,10 +7,17 @@ controls beyond the basic cost raster, start point, and end point:
 
 1. **Curvature Control**: Penalizes sharp turns to produce smoother paths.
    - ``curvature_factor`` (0.0-1.0): Soft penalty weight for turns.
-   - ``max_turning_angle`` (0-180 degrees): Hard limit on allowed turn angles.
+   - ``min_turning_angle`` (0-180 degrees): Minimum interior angle at turns.
+     Higher values enforce gentler turns.
+   - Built-in anti-zigzag preference that favours straight-line continuation
+     when the cost surface varies little.
 
 2. **Distance Factor**: Weights path length as an additional cost component,
    encouraging shorter paths when set above zero.
+
+3. **Path Smoothing**: After computing the grid-cell path, Chaikin's
+   corner-cutting algorithm is applied to produce a smooth curve that
+   replaces sharp corners with rounded arcs.
 
 The algorithm uses a modified Dijkstra's search on a raster grid with
 8-connectivity. When curvature control is active, the search state includes
@@ -47,6 +54,10 @@ NO_DIR: int = -1
 
 # Internal amplifier so that curvature_factor in [0, 1] has a visible effect.
 _CURVATURE_AMPLIFIER: float = 5.0
+
+# Straightness penalty multiplier applied when changing direction and
+# the straight-ahead cell has similar cost.  Reduces zigzag artefacts.
+_STRAIGHTNESS_PENALTY: float = 0.3
 
 
 def turning_angle(dir_from: int, dir_to: int) -> float:
@@ -85,7 +96,7 @@ def enhanced_least_cost_path(
     start: Tuple[int, int],
     end: Tuple[int, int],
     curvature_factor: float = 0.0,
-    max_turning_angle: float = 180.0,
+    min_turning_angle: float = 0.0,
     distance_factor: float = 0.0,
     cell_size: Tuple[float, float] = (1.0, 1.0),
 ) -> Dict:
@@ -104,9 +115,11 @@ def enhanced_least_cost_path(
         Soft penalty weight for sharp turns (0.0 – 1.0, default 0.0).
         0.0 disables the penalty (standard LCP).  Higher values produce
         smoother, more gently curving paths.
-    max_turning_angle : float, optional
-        Hard upper limit on turning angle in degrees (0 – 180, default 180).
-        180 allows any turn; lower values forbid sharp turns entirely.
+    min_turning_angle : float, optional
+        Minimum interior angle at any turn vertex in degrees (0 – 180,
+        default 0).  0 allows any turn; higher values enforce gentler
+        turns.  For example, ``min_turning_angle=135`` means the path
+        can only deflect by up to 45° at each step.
     distance_factor : float, optional
         Weight for raw path length in the cost function (0.0 – 1.0,
         default 0.0).  Higher values encourage shorter paths even if they
@@ -119,6 +132,8 @@ def enhanced_least_cost_path(
     -------
     dict
         ``path``            – list of ``(row, col)`` tuples from start to end.
+        ``smoothed_path``   – list of ``(row, col)`` float tuples after
+                              Chaikin corner-cutting smoothing.
         ``total_cost``      – accumulated cost along the optimal path.
         ``path_length``     – physical length of the path in map units.
         ``directions``      – direction index at each step.
@@ -140,28 +155,35 @@ def enhanced_least_cost_path(
         base_cost        = cost_raster[B] * step_distance
         curvature_penalty = curvature_factor * amplifier
                             * (turning_angle / 180) * step_distance * cost_scale
+        straightness_pen  = similarity * penalty * cost_scale * step_distance
         distance_penalty  = distance_factor * step_distance * cost_scale
 
-        total_step_cost  = base_cost + curvature_penalty + distance_penalty
+        total_step_cost  = base_cost + curvature_penalty
+                           + straightness_pen + distance_penalty
 
-    where *cost_scale* is the mean of all finite cost-raster values and
+    where *cost_scale* is the mean of all finite cost-raster values,
+    *similarity* measures how close the target-cell cost is to the
+    straight-ahead cell cost (1 when equal, 0 when very different), and
     *amplifier* is an internal constant (5.0) that ensures ``curvature_factor``
     values between 0 and 1 produce a noticeable effect.
 
-    When ``curvature_factor == 0`` **and** ``max_turning_angle == 180`` the
+    When ``curvature_factor == 0`` **and** ``min_turning_angle == 0`` the
     algorithm automatically drops direction tracking, reducing memory and
     run-time to that of a standard Dijkstra LCP.
+
+    A **Chaikin corner-cutting** post-processing pass is always applied to
+    produce a ``smoothed_path`` with rounded turns instead of sharp corners.
     """
     # ---- Validate inputs --------------------------------------------------
     _validate_params(cost_raster, start, end, curvature_factor,
-                     max_turning_angle, distance_factor)
+                     min_turning_angle, distance_factor)
 
-    use_curvature = curvature_factor > 0.0 or max_turning_angle < 180.0
+    use_curvature = curvature_factor > 0.0 or min_turning_angle > 0.0
 
     if use_curvature:
         return _dijkstra_with_direction(
             cost_raster, start, end,
-            curvature_factor, max_turning_angle, distance_factor, cell_size,
+            curvature_factor, min_turning_angle, distance_factor, cell_size,
         )
     return _dijkstra_standard(
         cost_raster, start, end, distance_factor, cell_size,
@@ -178,7 +200,7 @@ def _validate_params(
     start: Tuple[int, int],
     end: Tuple[int, int],
     curvature_factor: float,
-    max_turning_angle: float,
+    min_turning_angle: float,
     distance_factor: float,
 ) -> None:
     if cost_raster.ndim != 2:
@@ -187,9 +209,9 @@ def _validate_params(
         raise ValueError(
             f"curvature_factor must be between 0.0 and 1.0, got {curvature_factor}"
         )
-    if not 0.0 <= max_turning_angle <= 180.0:
+    if not 0.0 <= min_turning_angle <= 180.0:
         raise ValueError(
-            f"max_turning_angle must be between 0.0 and 180.0, got {max_turning_angle}"
+            f"min_turning_angle must be between 0.0 and 180.0, got {min_turning_angle}"
         )
     if not 0.0 <= distance_factor <= 1.0:
         raise ValueError(
@@ -295,7 +317,7 @@ def _dijkstra_with_direction(
     start: Tuple[int, int],
     end: Tuple[int, int],
     curvature_factor: float,
-    max_turning_angle: float,
+    min_turning_angle: float,
     distance_factor: float,
     cell_size: Tuple[float, float],
 ) -> Dict:
@@ -307,6 +329,8 @@ def _dijkstra_with_direction(
     scale = _cost_scale(cost_raster)
     curv_weight = curvature_factor * _CURVATURE_AMPLIFIER * scale
     dist_weight = distance_factor * scale
+    # Maximum deflection allowed, derived from the minimum interior angle.
+    max_deflection = 180.0 - min_turning_angle
 
     # best_cost shape: (rows, cols, NUM_DIRS + 1)
     # Index NUM_DIRS stores the NO_DIR sentinel for the start cell.
@@ -348,16 +372,31 @@ def _dijkstra_with_direction(
             sd = step_dists[d_out]
             base = cell_val * sd
 
-            # Curvature penalty
+            # Curvature penalty and hard turn constraint
             curv_penalty = 0.0
             if d_in != NO_DIR:
                 angle = turning_angle(d_in, d_out)
-                if angle > max_turning_angle:
+                if angle > max_deflection:
                     continue
                 curv_penalty = curv_weight * (angle / 180.0) * sd
 
+            # Anti-zigzag: penalize direction changes when cost variation
+            # is low (going straight would cost about the same).
+            straightness_penalty = 0.0
+            if d_in != NO_DIR and d_out != d_in:
+                str_dr, str_dc = DIRECTIONS[d_in]
+                str_r, str_c = r + str_dr, c + str_dc
+                if (0 <= str_r < rows and 0 <= str_c < cols
+                        and np.isfinite(cost_raster[str_r, str_c])
+                        and cost_raster[str_r, str_c] >= 0):
+                    cost_ratio = abs(cell_val - cost_raster[str_r, str_c]) / scale
+                    similarity = max(0.0, 1.0 - cost_ratio)
+                else:
+                    similarity = 0.0
+                straightness_penalty = similarity * _STRAIGHTNESS_PENALTY * scale * sd
+
             dist_penalty = dist_weight * sd
-            new_cost = cost + base + curv_penalty + dist_penalty
+            new_cost = cost + base + curv_penalty + straightness_penalty + dist_penalty
 
             nd_idx = d_out
             if new_cost < best[nr, nc, nd_idx]:
@@ -408,6 +447,7 @@ def _build_result(
 
     return {
         "path": path,
+        "smoothed_path": smooth_path(path),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -450,11 +490,66 @@ def _build_result_directed(
 
     return {
         "path": path,
+        "smoothed_path": smooth_path(path),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
         "turning_angles": turning_angles,
     }
+
+
+# ---------------------------------------------------------------------------
+# Path smoothing
+# ---------------------------------------------------------------------------
+
+
+def smooth_path(
+    path: List[Tuple[int, int]],
+    iterations: int = 3,
+) -> List[Tuple[float, float]]:
+    """Smooth a grid path into a curve using Chaikin's corner-cutting algorithm.
+
+    Converts the discrete grid-cell path into a smooth curve by iteratively
+    cutting corners.  Start and end points are preserved exactly.  The result
+    replaces sharp angular turns with rounded arcs.
+
+    Parameters
+    ----------
+    path : list[tuple[int, int]]
+        Grid cells ``(row, col)`` from the pathfinding result.
+    iterations : int, optional
+        Number of smoothing passes (default 3).  More iterations produce
+        smoother curves.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Smoothed path as fractional ``(row, col)`` coordinates.
+    """
+    if len(path) <= 2:
+        return [(float(r), float(c)) for r, c in path]
+
+    pts: List[Tuple[float, float]] = [(float(r), float(c)) for r, c in path]
+
+    for _ in range(iterations):
+        if len(pts) <= 2:
+            break
+        new_pts: List[Tuple[float, float]] = [pts[0]]
+        for i in range(len(pts) - 1):
+            r0, c0 = pts[i]
+            r1, c1 = pts[i + 1]
+            # Q point at 1/4 from p0 toward p1
+            qr = 0.75 * r0 + 0.25 * r1
+            qc = 0.75 * c0 + 0.25 * c1
+            # R point at 3/4 from p0 toward p1
+            rr = 0.25 * r0 + 0.75 * r1
+            rc = 0.25 * c0 + 0.75 * c1
+            new_pts.append((qr, qc))
+            new_pts.append((rr, rc))
+        new_pts.append(pts[-1])
+        pts = new_pts
+
+    return pts
 
 
 # ---------------------------------------------------------------------------

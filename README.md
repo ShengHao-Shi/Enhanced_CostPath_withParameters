@@ -16,6 +16,8 @@ values.  In practice two additional controls are needed:
 |---|---|
 | **Curvature / turn control** | Standard LCP often produces paths with abrupt, sharp turns that are unrealistic for roads, pipelines, or similar linear features. |
 | **Distance weighting** | Standard LCP considers only the cost surface; it may route a path through a long detour of low-cost cells when a slightly more expensive but much shorter route would be preferable. |
+| **Anti-zigzag** | On rasters with low cost variation the grid-based path often zigzags between cells; the algorithm should prefer straight-line continuation. |
+| **Smooth curves** | Even with turn constraints, grid-aligned paths have angular corners; a post-processing step rounds them into smooth arcs. |
 
 ## Approach — ArcGIS vs. Standalone
 
@@ -54,32 +56,45 @@ For each step from cell *A* to neighbour *B*, arriving at *A* from direction
 *d_in* and leaving toward direction *d_out*:
 
 ```
-step_cost = base_cost + curvature_penalty + distance_penalty
+step_cost = base_cost + curvature_penalty + straightness_penalty + distance_penalty
 ```
 
 | Component | Formula | When active |
 |---|---|---|
 | **base_cost** | `cost_raster[B] × step_distance` | Always |
 | **curvature_penalty** | `curvature_factor × amplifier × (angle / 180) × step_distance × cost_scale` | `curvature_factor > 0` |
+| **straightness_penalty** | `similarity × 0.3 × cost_scale × step_distance` | Direction change in direction-aware mode |
 | **distance_penalty** | `distance_factor × step_distance × cost_scale` | `distance_factor > 0` |
 
 * `step_distance` — Euclidean distance between cell centres (1 for cardinal,
   √2 for diagonal, scaled by `cell_size`).
 * `cost_scale` — mean of all finite cost-raster values; used to keep penalty
   terms in the same order of magnitude as the base cost.
+* `similarity` — how close the target-cell cost is to the straight-ahead
+  cell cost (1.0 when equal, 0.0 when very different).  This makes the
+  anti-zigzag penalty adaptive: direction changes are discouraged more
+  strongly when cost variation is low.
 * `amplifier` — internal constant (5.0) that makes `curvature_factor` values
   between 0 and 1 produce a visible effect.
 
 ### Hard Turn Constraint
 
-If `max_turning_angle` is set below 180°, any transition whose turning angle
-exceeds that threshold is simply disallowed (pruned from the search).
+If `min_turning_angle` is set above 0°, any transition whose interior angle
+is less than that threshold is disallowed (pruned from the search).
+Equivalently, the maximum deflection allowed is `180 − min_turning_angle`.
 
 ### Performance Optimisation
 
-When `curvature_factor == 0` **and** `max_turning_angle == 180`, the
+When `curvature_factor == 0` **and** `min_turning_angle == 0`, the
 algorithm automatically falls back to a standard (direction-free) Dijkstra
 search with a smaller state space.
+
+### Path Smoothing
+
+After the grid-cell path is computed, **Chaikin's corner-cutting algorithm**
+is applied to produce a `smoothed_path` where angular corners are replaced
+by rounded arcs.  The smoothed coordinates are fractional (row, col) values
+and are always included in the result dictionary.
 
 ---
 
@@ -91,7 +106,7 @@ search with a smaller state space.
 | `start` | `(row, col)` | — | *(required)* | Start cell. |
 | `end` | `(row, col)` | — | *(required)* | End cell. |
 | `curvature_factor` | float | 0.0 – 1.0 | 0.0 | Soft penalty weight for sharp turns.  0 = standard LCP. |
-| `max_turning_angle` | float | 0 – 180 | 180.0 | Hard limit on turning angle (degrees).  180 = unrestricted. |
+| `min_turning_angle` | float | 0 – 180 | 0.0 | Minimum interior angle at turn vertices (degrees).  0 = unrestricted; higher = gentler turns. |
 | `distance_factor` | float | 0.0 – 1.0 | 0.0 | Weight for raw path length.  Higher ⇒ shorter paths preferred. |
 | `cell_size` | `(y, x)` | — | `(1, 1)` | Physical cell dimensions in map units. |
 
@@ -102,6 +117,7 @@ A dictionary with:
 | Key | Type | Description |
 |---|---|---|
 | `path` | `list[(row, col)]` | Ordered cell coordinates from start to end. |
+| `smoothed_path` | `list[(float, float)]` | Smoothed path with rounded turns (fractional row/col). |
 | `total_cost` | `float` | Accumulated cost along the path. |
 | `path_length` | `float` | Physical path length in map units. |
 | `directions` | `list[int]` | Direction index (0–7) at each step. |
@@ -127,13 +143,14 @@ result = enhanced_least_cost_path(
     start=(0, 0),
     end=(49, 49),
     curvature_factor=0.5,      # moderate smoothing
-    max_turning_angle=90.0,    # no turns sharper than 90°
+    min_turning_angle=90.0,    # interior angle at turns ≥ 90°
     distance_factor=0.3,       # mildly prefer shorter paths
 )
 
 print(f"Path length : {result['path_length']:.1f}")
 print(f"Total cost  : {result['total_cost']:.1f}")
 print(f"Max turn    : {max(result['turning_angles']):.0f}°")
+print(f"Smoothed pts: {len(result['smoothed_path'])}")
 ```
 
 ## Quick Start (ArcGIS Pro)

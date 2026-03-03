@@ -9,6 +9,7 @@ from enhanced_lcp import (
     DIRECTIONS,
     NUM_DIRS,
     enhanced_least_cost_path,
+    smooth_path,
     turning_angle,
 )
 
@@ -66,10 +67,10 @@ class TestValidation:
             enhanced_least_cost_path(simple_raster, (0, 0), (4, 4),
                                      curvature_factor=-0.1)
 
-    def test_max_turning_angle_too_high(self, simple_raster):
-        with pytest.raises(ValueError, match="max_turning_angle"):
+    def test_min_turning_angle_too_high(self, simple_raster):
+        with pytest.raises(ValueError, match="min_turning_angle"):
             enhanced_least_cost_path(simple_raster, (0, 0), (4, 4),
-                                     max_turning_angle=200.0)
+                                     min_turning_angle=200.0)
 
     def test_distance_factor_too_high(self, simple_raster):
         with pytest.raises(ValueError, match="distance_factor"):
@@ -208,8 +209,8 @@ class TestCurvatureFactor:
         max_angle_hi = max(res_hi_curv["turning_angles"], default=0)
         assert max_angle_hi <= max_angle_no
 
-    def test_max_turning_angle_constraint(self):
-        """With max_turning_angle=45, no turn should exceed 45 degrees."""
+    def test_min_turning_angle_constraint(self):
+        """With min_turning_angle=135, no deflection should exceed 45 degrees."""
         raster = np.ones((10, 10))
         # Add some cost variation to encourage turns
         raster[3:7, 3:7] = 5.0
@@ -217,19 +218,19 @@ class TestCurvatureFactor:
         start, end = (0, 0), (9, 9)
         result = enhanced_least_cost_path(
             raster, start, end,
-            curvature_factor=0.5, max_turning_angle=45.0,
+            curvature_factor=0.5, min_turning_angle=135.0,
         )
         for angle in result["turning_angles"]:
             assert angle <= 45.0 + 1e-9
 
-    def test_max_turning_angle_90(self):
-        """With max_turning_angle=90, no turn should exceed 90 degrees."""
+    def test_min_turning_angle_90(self):
+        """With min_turning_angle=90, no deflection should exceed 90 degrees."""
         raster = np.ones((8, 8))
         raster[2:6, 2:6] = 10.0
         start, end = (0, 0), (7, 7)
         result = enhanced_least_cost_path(
             raster, start, end,
-            curvature_factor=0.3, max_turning_angle=90.0,
+            curvature_factor=0.3, min_turning_angle=90.0,
         )
         for angle in result["turning_angles"]:
             assert angle <= 90.0 + 1e-9
@@ -268,7 +269,7 @@ class TestCombined:
         result = enhanced_least_cost_path(
             raster, (0, 0), (14, 14),
             curvature_factor=0.5,
-            max_turning_angle=90.0,
+            min_turning_angle=90.0,
             distance_factor=0.3,
         )
         assert len(result["path"]) >= 2
@@ -278,3 +279,87 @@ class TestCombined:
         assert result["path_length"] > 0
         for angle in result["turning_angles"]:
             assert angle <= 90.0 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Straightness (anti-zigzag)
+# ---------------------------------------------------------------------------
+
+
+class TestStraightness:
+    """Verify that the anti-zigzag straightness penalty works."""
+
+    def test_uniform_raster_fewer_turns(self):
+        """On a uniform raster with curvature enabled, the path should
+        have very few direction changes thanks to anti-zigzag."""
+        raster = np.ones((15, 15))
+        start, end = (0, 0), (14, 14)
+        result = enhanced_least_cost_path(
+            raster, start, end, curvature_factor=0.3,
+        )
+        # On a uniform raster going diagonally, ideal path is a straight
+        # diagonal with zero direction changes.
+        assert len(result["turning_angles"]) == 0 or all(
+            a == 0.0 for a in result["turning_angles"]
+        )
+
+    def test_low_variation_prefers_straight(self):
+        """When cost variation is small, the path should prefer going
+        straight rather than zigzagging to slightly cheaper cells."""
+        rng = np.random.default_rng(123)
+        raster = 5.0 + rng.uniform(-0.1, 0.1, (12, 12))
+        start, end = (0, 0), (11, 11)
+        result = enhanced_least_cost_path(
+            raster, start, end, curvature_factor=0.5,
+        )
+        # Count actual direction changes (non-zero turning angles)
+        n_turns = sum(1 for a in result["turning_angles"] if a > 0)
+        # Should be very few turns on a nearly uniform raster
+        assert n_turns <= 3
+
+
+# ---------------------------------------------------------------------------
+# Path smoothing
+# ---------------------------------------------------------------------------
+
+
+class TestSmoothing:
+    """Verify smooth_path (Chaikin's corner-cutting) post-processing."""
+
+    def test_endpoints_preserved(self):
+        """Start and end points must be preserved exactly."""
+        path = [(0, 0), (1, 1), (2, 0), (3, 1)]
+        smoothed = smooth_path(path)
+        assert smoothed[0] == (0.0, 0.0)
+        assert smoothed[-1] == (3.0, 1.0)
+
+    def test_more_points_than_original(self):
+        """Smoothing should produce more points than the input."""
+        path = [(0, 0), (3, 0), (3, 3), (0, 3)]
+        smoothed = smooth_path(path)
+        assert len(smoothed) > len(path)
+
+    def test_two_point_path_unchanged(self):
+        """A straight two-point path should remain unchanged."""
+        path = [(0, 0), (5, 5)]
+        smoothed = smooth_path(path)
+        assert len(smoothed) == 2
+        assert smoothed[0] == (0.0, 0.0)
+        assert smoothed[-1] == (5.0, 5.0)
+
+    def test_single_point_path(self):
+        """A single-point path should be returned as-is."""
+        path = [(3, 4)]
+        smoothed = smooth_path(path)
+        assert smoothed == [(3.0, 4.0)]
+
+    def test_smoothed_path_in_result(self):
+        """The result dict must contain a 'smoothed_path' key."""
+        raster = np.ones((5, 5))
+        result = enhanced_least_cost_path(raster, (0, 0), (4, 4))
+        assert "smoothed_path" in result
+        assert len(result["smoothed_path"]) >= len(result["path"])
+        # Check start/end preserved
+        sp = result["smoothed_path"]
+        assert sp[0] == (0.0, 0.0)
+        assert sp[-1] == (4.0, 4.0)

@@ -105,15 +105,15 @@ class EnhancedLeastCostPathTool:
         p_curv.filter.list = [0.0, 1.0]
         params.append(p_curv)
 
-        # 4 – Maximum turning angle
+        # 4 – Minimum turning angle
         p_angle = arcpy.Parameter(
-            displayName="Maximum Turning Angle (degrees, 0 – 180)",
-            name="max_turning_angle",
+            displayName="Minimum Turning Angle (degrees, 0 – 180)",
+            name="min_turning_angle",
             datatype="GPDouble",
             parameterType="Optional",
             direction="Input",
         )
-        p_angle.value = 180.0
+        p_angle.value = 0.0
         p_angle.filter.type = "Range"
         p_angle.filter.list = [0.0, 180.0]
         params.append(p_angle)
@@ -165,7 +165,7 @@ class EnhancedLeastCostPathTool:
         start_fc = parameters[1].valueAsText
         end_fc = parameters[2].valueAsText
         curvature_factor = float(parameters[3].value or 0.0)
-        max_turning_angle = float(parameters[4].value or 180.0)
+        min_turning_angle = float(parameters[4].value or 0.0)
         distance_factor = float(parameters[5].value or 0.0)
         output_fc = parameters[6].valueAsText
 
@@ -198,7 +198,7 @@ class EnhancedLeastCostPathTool:
             start_rc,
             end_rc,
             curvature_factor=curvature_factor,
-            max_turning_angle=max_turning_angle,
+            min_turning_angle=min_turning_angle,
             distance_factor=distance_factor,
             cell_size=(cell_y, cell_x),
         )
@@ -209,8 +209,9 @@ class EnhancedLeastCostPathTool:
             f"length={result['path_length']:.2f}"
         )
 
-        # --- Write output polyline -----------------------------------------
-        _write_polyline(result["path"], extent, cell_x, cell_y, sr, output_fc)
+        # --- Write output polyline (using smoothed path for rounded turns) ---
+        _write_polyline(result["smoothed_path"], extent, cell_x, cell_y,
+                        sr, output_fc)
 
         messages.addMessage(f"Output written to {output_fc}")
         return
@@ -244,7 +245,11 @@ def _xy_to_rowcol(xy, extent, cell_x, cell_y, shape):
 
 
 def _write_polyline(path, extent, cell_x, cell_y, sr, output_fc):
-    """Write the path cells as a single polyline feature class."""
+    """Write the path as a single polyline feature class.
+
+    *path* can be integer ``(row, col)`` grid cells or fractional
+    ``(row, col)`` coordinates from ``smooth_path``.
+    """
     points = []
     for r, c in path:
         x = extent.XMin + (c + 0.5) * cell_x
