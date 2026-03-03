@@ -261,7 +261,7 @@ def _min_cost(cost_raster: np.ndarray) -> float:
     valid = cost_raster[np.isfinite(cost_raster)]
     valid = valid[valid >= 0]
     if valid.size == 0:
-        return 0.0
+        return 1.0
     return float(np.min(valid))
 
 
@@ -449,10 +449,8 @@ def _dijkstra_with_direction(
                 if (0 <= str_r < rows and 0 <= str_c < cols):
                     str_val = cost_list[str_r][str_c]
                     if _isfinite(str_val) and str_val >= 0:
-                        cost_ratio = abs(cell_val - str_val) / scale
-                        similarity = 1.0 - cost_ratio
-                        if similarity > 0.0:
-                            straightness_penalty = similarity * straight_weight * sd
+                        similarity = max(0.0, 1.0 - abs(cell_val - str_val) / scale)
+                        straightness_penalty = similarity * straight_weight * sd
 
             new_cost = g + base + curv_penalty + straightness_penalty + dist_weight * sd
 
@@ -491,8 +489,7 @@ def _build_result(
     r, c = end
     while r >= 0:
         path.append((int(r), int(c)))
-        pr, pc = int(parent_r[r, c]), int(parent_c[r, c])
-        r, c = pr, pc
+        r, c = parent_r[r, c], parent_c[r, c]
     path.reverse()
 
     cy, cx = cell_size
@@ -533,11 +530,10 @@ def _build_result_directed(
     d_idx = d if d >= 0 else NUM_DIRS
     while r >= 0:
         states.append((int(r), int(c), int(d)))
-        new_r = int(parent_r[r, c, d_idx])
-        new_c = int(parent_c[r, c, d_idx])
-        new_d = int(parent_d[r, c, d_idx])
-        d_idx = new_d if new_d >= 0 else NUM_DIRS
-        r, c, d = new_r, new_c, new_d
+        nr, nc = parent_r[r, c, d_idx], parent_c[r, c, d_idx]
+        nd = int(parent_d[r, c, d_idx])
+        d_idx = nd if nd >= 0 else NUM_DIRS
+        r, c, d = nr, nc, nd
     states.reverse()
 
     path = [(r, c) for r, c, _ in states]
