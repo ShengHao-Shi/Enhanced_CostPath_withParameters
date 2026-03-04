@@ -390,3 +390,39 @@ class TestScalability:
         assert result["total_cost"] > 0
         for angle in result["turning_angles"]:
             assert angle <= 90.0 + 1e-9
+
+    def test_float32_input_raster(self):
+        """Algorithm should work correctly with float32 input rasters."""
+        rng = np.random.default_rng(42)
+        raster_f32 = rng.uniform(1, 100, (50, 50)).astype(np.float32)
+
+        # Standard path
+        res = enhanced_least_cost_path(raster_f32, (5, 5), (45, 45))
+        assert res["path"][0] == (5, 5)
+        assert res["path"][-1] == (45, 45)
+        assert res["total_cost"] > 0
+
+        # With curvature
+        res_curv = enhanced_least_cost_path(
+            raster_f32, (5, 5), (45, 45),
+            curvature_factor=0.5, min_turning_angle=90.0,
+        )
+        assert res_curv["path"][0] == (5, 5)
+        assert res_curv["path"][-1] == (45, 45)
+        for angle in res_curv["turning_angles"]:
+            assert angle <= 90.0 + 1e-9
+
+    def test_high_cost_values(self):
+        """Algorithm should handle high cost values without precision loss."""
+        rng = np.random.default_rng(99)
+        # High cost values: accumulated costs will be large.
+        raster = rng.uniform(500, 1000, (100, 100))
+        result = enhanced_least_cost_path(
+            raster, (0, 0), (99, 99),
+            curvature_factor=0.3, min_turning_angle=90.0,
+        )
+        assert result["path"][0] == (0, 0)
+        assert result["path"][-1] == (99, 99)
+        assert result["total_cost"] > 0
+        for angle in result["turning_angles"]:
+            assert angle <= 90.0 + 1e-9

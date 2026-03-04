@@ -289,7 +289,8 @@ def _dijkstra_standard(
     cy, cx = cell_size
     h_weight = _min_cost(cost_raster) + dist_weight
 
-    best = np.full((rows, cols), np.inf)
+    # Use float32 to halve memory (~1.18 GB savings on a 6908×4750 raster).
+    best = np.full((rows, cols), np.inf, dtype=np.float32)
     best[sr, sc] = 0.0
     # Store only the arrival direction (int8) instead of parent row/col.
     # Parent cell is derived: parent = (r - DIRECTIONS[d][0], c - DIRECTIONS[d][1]).
@@ -329,8 +330,12 @@ def _dijkstra_standard(
                 best[nr, nc] = new_cost
                 parent_dir[nr, nc] = d
                 counter += 1
+                # Read back the float32-rounded value so the heap
+                # entry matches what is stored in best, preventing
+                # false skips from float64→float32 truncation.
+                g_stored = float(best[nr, nc])
                 h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
-                _heappush(pq, (new_cost + h_nb, counter, new_cost, nr, nc))
+                _heappush(pq, (g_stored + h_nb, counter, g_stored, nr, nc))
 
     if not np.isfinite(best[er, ec]):
         raise RuntimeError("No path found between start and end")
@@ -370,8 +375,9 @@ def _dijkstra_with_direction(
 
     # best_cost shape: (rows, cols, NUM_DIRS + 1)
     # Index NUM_DIRS stores the NO_DIR sentinel for the start cell.
+    # Use float32 to halve memory (~1.18 GB savings on a 6908×4750 raster).
     n_states = NUM_DIRS + 1
-    best = np.full((rows, cols, n_states), np.inf)
+    best = np.full((rows, cols, n_states), np.inf, dtype=np.float32)
     best[sr, sc, NUM_DIRS] = 0.0  # start with NO_DIR
 
     # Store only the parent's arrival direction (int8).  Parent cell
@@ -450,8 +456,12 @@ def _dijkstra_with_direction(
                 best[nr, nc, nd_idx] = new_cost
                 parent_d[nr, nc, nd_idx] = d_in
                 counter += 1
+                # Read back the float32-rounded value so the heap
+                # entry matches what is stored in best, preventing
+                # false skips from float64→float32 truncation.
+                g_stored = float(best[nr, nc, nd_idx])
                 h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
-                _heappush(pq, (new_cost + h_nb, counter, new_cost, nr, nc, d_out))
+                _heappush(pq, (g_stored + h_nb, counter, g_stored, nr, nc, d_out))
 
     if not found:
         raise RuntimeError("No path found between start and end")

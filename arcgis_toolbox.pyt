@@ -172,7 +172,7 @@ class EnhancedLeastCostPathTool:
         # --- Read cost raster via arcpy ------------------------------------
         raster = arcpy.Raster(cost_raster_path)
         cost_array = arcpy.RasterToNumPyArray(raster, nodata_to_value=np.nan)
-        cost_array = cost_array.astype(np.float64)
+        cost_array = cost_array.astype(np.float32)
         cell_x = raster.meanCellWidth
         cell_y = raster.meanCellHeight
         extent = raster.extent
