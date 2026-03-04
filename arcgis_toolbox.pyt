@@ -18,6 +18,7 @@ Requirements
 * ``numpy`` (bundled with ArcGIS Pro).
 """
 
+import importlib
 import os
 import sys
 
@@ -29,7 +30,7 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from enhanced_lcp import enhanced_least_cost_path  # noqa: E402
+import enhanced_lcp as _enhanced_lcp_mod  # noqa: E402
 
 
 class Toolbox:
@@ -161,6 +162,10 @@ class EnhancedLeastCostPathTool:
     # ------------------------------------------------------------------
 
     def execute(self, parameters, messages):  # noqa: N802
+        # Reload enhanced_lcp so code changes take effect without
+        # restarting ArcGIS Pro (Python caches imported modules).
+        importlib.reload(_enhanced_lcp_mod)
+
         cost_raster_path = parameters[0].valueAsText
         start_fc = parameters[1].valueAsText
         end_fc = parameters[2].valueAsText
@@ -194,7 +199,7 @@ class EnhancedLeastCostPathTool:
         )
 
         # --- Run the algorithm ---------------------------------------------
-        result = enhanced_least_cost_path(
+        result = _enhanced_lcp_mod.enhanced_least_cost_path(
             cost_array,
             start_rc,
             end_rc,
