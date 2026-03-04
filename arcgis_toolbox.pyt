@@ -61,32 +61,32 @@ class EnhancedLeastCostPathTool:
         """Define the tool parameters."""
         params = []
 
-        # 0 – Input cost raster
+        # 0 – Input cost raster (dropdown lists raster layers in current map)
         p_cost = arcpy.Parameter(
             displayName="Cost Raster",
             name="cost_raster",
-            datatype="DERasterDataset",
+            datatype="GPRasterLayer",
             parameterType="Required",
             direction="Input",
         )
         params.append(p_cost)
 
-        # 1 – Start point
+        # 1 – Start point (dropdown lists feature layers in current map)
         p_start = arcpy.Parameter(
             displayName="Start Point",
             name="start_point",
-            datatype="DEFeatureClass",
+            datatype="GPFeatureLayer",
             parameterType="Required",
             direction="Input",
         )
         p_start.filter.list = ["Point"]
         params.append(p_start)
 
-        # 2 – End point
+        # 2 – End point (dropdown lists feature layers in current map)
         p_end = arcpy.Parameter(
             displayName="End Point",
             name="end_point",
-            datatype="DEFeatureClass",
+            datatype="GPFeatureLayer",
             parameterType="Required",
             direction="Input",
         )
