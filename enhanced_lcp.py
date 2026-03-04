@@ -330,9 +330,10 @@ def _dijkstra_standard(
                 best[nr, nc] = new_cost
                 parent_dir[nr, nc] = d
                 counter += 1
-                # Read back the float32-rounded value so the heap
-                # entry matches what is stored in best, preventing
-                # false skips from float64→float32 truncation.
+                # Read back the float32-rounded value (as a Python
+                # float64) so the heap entry matches what is stored
+                # in best, preventing false skips when g > best due
+                # to float64→float32 rounding.
                 g_stored = float(best[nr, nc])
                 h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
                 _heappush(pq, (g_stored + h_nb, counter, g_stored, nr, nc))
@@ -456,9 +457,10 @@ def _dijkstra_with_direction(
                 best[nr, nc, nd_idx] = new_cost
                 parent_d[nr, nc, nd_idx] = d_in
                 counter += 1
-                # Read back the float32-rounded value so the heap
-                # entry matches what is stored in best, preventing
-                # false skips from float64→float32 truncation.
+                # Read back the float32-rounded value (as a Python
+                # float64) so the heap entry matches what is stored
+                # in best, preventing false skips when g > best due
+                # to float64→float32 rounding.
                 g_stored = float(best[nr, nc, nd_idx])
                 h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
                 _heappush(pq, (g_stored + h_nb, counter, g_stored, nr, nc, d_out))
