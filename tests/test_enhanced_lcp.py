@@ -67,10 +67,10 @@ class TestValidation:
             enhanced_least_cost_path(simple_raster, (0, 0), (4, 4),
                                      curvature_factor=-0.1)
 
-    def test_min_turning_angle_too_high(self, simple_raster):
-        with pytest.raises(ValueError, match="min_turning_angle"):
+    def test_max_turning_angle_too_high(self, simple_raster):
+        with pytest.raises(ValueError, match="max_turning_angle"):
             enhanced_least_cost_path(simple_raster, (0, 0), (4, 4),
-                                     min_turning_angle=200.0)
+                                     max_turning_angle=200.0)
 
     def test_distance_factor_too_high(self, simple_raster):
         with pytest.raises(ValueError, match="distance_factor"):
@@ -209,8 +209,8 @@ class TestCurvatureFactor:
         max_angle_hi = max(res_hi_curv["turning_angles"], default=0)
         assert max_angle_hi <= max_angle_no
 
-    def test_min_turning_angle_constraint(self):
-        """With min_turning_angle=135, no deflection should exceed 45 degrees."""
+    def test_max_turning_angle_constraint(self):
+        """With max_turning_angle=45, no deflection should exceed 45 degrees."""
         raster = np.ones((10, 10))
         # Add some cost variation to encourage turns
         raster[3:7, 3:7] = 5.0
@@ -218,19 +218,19 @@ class TestCurvatureFactor:
         start, end = (0, 0), (9, 9)
         result = enhanced_least_cost_path(
             raster, start, end,
-            curvature_factor=0.5, min_turning_angle=135.0,
+            curvature_factor=0.5, max_turning_angle=45.0,
         )
         for angle in result["turning_angles"]:
             assert angle <= 45.0 + 1e-9
 
-    def test_min_turning_angle_90(self):
-        """With min_turning_angle=90, no deflection should exceed 90 degrees."""
+    def test_max_turning_angle_90(self):
+        """With max_turning_angle=90, no deflection should exceed 90 degrees."""
         raster = np.ones((8, 8))
         raster[2:6, 2:6] = 10.0
         start, end = (0, 0), (7, 7)
         result = enhanced_least_cost_path(
             raster, start, end,
-            curvature_factor=0.3, min_turning_angle=90.0,
+            curvature_factor=0.3, max_turning_angle=90.0,
         )
         for angle in result["turning_angles"]:
             assert angle <= 90.0 + 1e-9
@@ -269,7 +269,7 @@ class TestCombined:
         result = enhanced_least_cost_path(
             raster, (0, 0), (14, 14),
             curvature_factor=0.5,
-            min_turning_angle=90.0,
+            max_turning_angle=90.0,
             distance_factor=0.3,
         )
         assert len(result["path"]) >= 2
@@ -382,7 +382,7 @@ class TestScalability:
         result = enhanced_least_cost_path(
             raster, (10, 10), (190, 190),
             curvature_factor=0.5,
-            min_turning_angle=90.0,
+            max_turning_angle=90.0,
             distance_factor=0.3,
         )
         assert result["path"][0] == (10, 10)
@@ -405,7 +405,7 @@ class TestScalability:
         # With curvature
         res_curv = enhanced_least_cost_path(
             raster_f32, (5, 5), (45, 45),
-            curvature_factor=0.5, min_turning_angle=90.0,
+            curvature_factor=0.5, max_turning_angle=90.0,
         )
         assert res_curv["path"][0] == (5, 5)
         assert res_curv["path"][-1] == (45, 45)
@@ -419,7 +419,7 @@ class TestScalability:
         raster = rng.uniform(500, 1000, (100, 100))
         result = enhanced_least_cost_path(
             raster, (0, 0), (99, 99),
-            curvature_factor=0.3, min_turning_angle=90.0,
+            curvature_factor=0.3, max_turning_angle=90.0,
         )
         assert result["path"][0] == (0, 0)
         assert result["path"][-1] == (99, 99)

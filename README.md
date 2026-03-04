@@ -79,13 +79,12 @@ step_cost = base_cost + curvature_penalty + straightness_penalty + distance_pena
 
 ### Hard Turn Constraint
 
-If `min_turning_angle` is set above 0°, any transition whose interior angle
-is less than that threshold is disallowed (pruned from the search).
-Equivalently, the maximum deflection allowed is `180 − min_turning_angle`.
+If `max_turning_angle` is set below 180°, any transition whose turning angle
+exceeds that threshold is disallowed (pruned from the search).
 
 ### Performance Optimisation
 
-When `curvature_factor == 0` **and** `min_turning_angle == 0`, the
+When `curvature_factor == 0` **and** `max_turning_angle == 180`, the
 algorithm automatically falls back to a standard (direction-free) Dijkstra
 search with a smaller state space.
 
@@ -106,7 +105,7 @@ and are always included in the result dictionary.
 | `start` | `(row, col)` | — | *(required)* | Start cell. |
 | `end` | `(row, col)` | — | *(required)* | End cell. |
 | `curvature_factor` | float | 0.0 – 1.0 | 0.0 | Soft penalty weight for sharp turns.  0 = standard LCP. |
-| `min_turning_angle` | float | 0 – 180 | 0.0 | Minimum interior angle at turn vertices (degrees).  0 = unrestricted; higher = gentler turns. |
+| `max_turning_angle` | float | 0 – 180 | 180.0 | Hard upper limit on turning angle (degrees).  180 = unrestricted; lower = gentler turns. |
 | `distance_factor` | float | 0.0 – 1.0 | 0.0 | Weight for raw path length.  Higher ⇒ shorter paths preferred. |
 | `cell_size` | `(y, x)` | — | `(1, 1)` | Physical cell dimensions in map units. |
 
@@ -143,7 +142,7 @@ result = enhanced_least_cost_path(
     start=(0, 0),
     end=(49, 49),
     curvature_factor=0.5,      # moderate smoothing
-    min_turning_angle=90.0,    # interior angle at turns ≥ 90°
+    max_turning_angle=90.0,    # turns limited to ≤ 90°
     distance_factor=0.3,       # mildly prefer shorter paths
 )
 

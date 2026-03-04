@@ -7,8 +7,8 @@ controls beyond the basic cost raster, start point, and end point:
 
 1. **Curvature Control**: Penalizes sharp turns to produce smoother paths.
    - ``curvature_factor`` (0.0-1.0): Soft penalty weight for turns.
-   - ``min_turning_angle`` (0-180 degrees): Minimum interior angle at turns.
-     Higher values enforce gentler turns.
+   - ``max_turning_angle`` (0-180 degrees): Hard limit on allowed turn angles.
+     Lower values enforce gentler turns.
    - Built-in anti-zigzag preference that favours straight-line continuation
      when the cost surface varies little.
 
@@ -103,7 +103,7 @@ def enhanced_least_cost_path(
     start: Tuple[int, int],
     end: Tuple[int, int],
     curvature_factor: float = 0.0,
-    min_turning_angle: float = 0.0,
+    max_turning_angle: float = 180.0,
     distance_factor: float = 0.0,
     cell_size: Tuple[float, float] = (1.0, 1.0),
 ) -> Dict:
@@ -122,11 +122,11 @@ def enhanced_least_cost_path(
         Soft penalty weight for sharp turns (0.0 – 1.0, default 0.0).
         0.0 disables the penalty (standard LCP).  Higher values produce
         smoother, more gently curving paths.
-    min_turning_angle : float, optional
-        Minimum interior angle at any turn vertex in degrees (0 – 180,
-        default 0).  0 allows any turn; higher values enforce gentler
-        turns.  For example, ``min_turning_angle=135`` means the path
-        can only deflect by up to 45° at each step.
+    max_turning_angle : float, optional
+        Hard upper limit on turning angle in degrees (0 – 180,
+        default 180).  180 allows any turn; lower values forbid sharp
+        turns entirely.  For example, ``max_turning_angle=45`` means the
+        path can only deflect by up to 45° at each step.
     distance_factor : float, optional
         Weight for raw path length in the cost function (0.0 – 1.0,
         default 0.0).  Higher values encourage shorter paths even if they
@@ -174,7 +174,7 @@ def enhanced_least_cost_path(
     *amplifier* is an internal constant (5.0) that ensures ``curvature_factor``
     values between 0 and 1 produce a noticeable effect.
 
-    When ``curvature_factor == 0`` **and** ``min_turning_angle == 0`` the
+    When ``curvature_factor == 0`` **and** ``max_turning_angle == 180`` the
     algorithm automatically drops direction tracking, reducing memory and
     run-time to that of a standard Dijkstra LCP.
 
@@ -183,14 +183,14 @@ def enhanced_least_cost_path(
     """
     # ---- Validate inputs --------------------------------------------------
     _validate_params(cost_raster, start, end, curvature_factor,
-                     min_turning_angle, distance_factor)
+                     max_turning_angle, distance_factor)
 
-    use_curvature = curvature_factor > 0.0 or min_turning_angle > 0.0
+    use_curvature = curvature_factor > 0.0 or max_turning_angle < 180.0
 
     if use_curvature:
         return _dijkstra_with_direction(
             cost_raster, start, end,
-            curvature_factor, min_turning_angle, distance_factor, cell_size,
+            curvature_factor, max_turning_angle, distance_factor, cell_size,
         )
     return _dijkstra_standard(
         cost_raster, start, end, distance_factor, cell_size,
@@ -207,7 +207,7 @@ def _validate_params(
     start: Tuple[int, int],
     end: Tuple[int, int],
     curvature_factor: float,
-    min_turning_angle: float,
+    max_turning_angle: float,
     distance_factor: float,
 ) -> None:
     if cost_raster.ndim != 2:
@@ -216,9 +216,9 @@ def _validate_params(
         raise ValueError(
             f"curvature_factor must be between 0.0 and 1.0, got {curvature_factor}"
         )
-    if not 0.0 <= min_turning_angle <= 180.0:
+    if not 0.0 <= max_turning_angle <= 180.0:
         raise ValueError(
-            f"min_turning_angle must be between 0.0 and 180.0, got {min_turning_angle}"
+            f"max_turning_angle must be between 0.0 and 180.0, got {max_turning_angle}"
         )
     if not 0.0 <= distance_factor <= 1.0:
         raise ValueError(
@@ -354,7 +354,7 @@ def _dijkstra_with_direction(
     start: Tuple[int, int],
     end: Tuple[int, int],
     curvature_factor: float,
-    min_turning_angle: float,
+    max_turning_angle: float,
     distance_factor: float,
     cell_size: Tuple[float, float],
 ) -> Dict:
@@ -367,8 +367,6 @@ def _dijkstra_with_direction(
     curv_weight = curvature_factor * _CURVATURE_AMPLIFIER * scale
     dist_weight = distance_factor * scale
     straight_weight = _STRAIGHTNESS_PENALTY * scale
-    # Maximum deflection angle allowed, derived from the minimum interior angle.
-    max_allowed_deflection = 180.0 - min_turning_angle
 
     # A* heuristic weight: admissible lower-bound cost per unit distance.
     cy, cx = cell_size
@@ -434,7 +432,7 @@ def _dijkstra_with_direction(
             curv_penalty = 0.0
             if d_in != _no_dir:
                 angle = _turn_lut[d_in][d_out]
-                if angle > max_allowed_deflection:
+                if angle > max_turning_angle:
                     continue
                 curv_penalty = _curv_div * angle * sd
 
