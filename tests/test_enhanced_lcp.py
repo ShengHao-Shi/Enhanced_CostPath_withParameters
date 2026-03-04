@@ -10,6 +10,7 @@ from enhanced_lcp import (
     NUM_DIRS,
     enhanced_least_cost_path,
     smooth_path,
+    straighten_path,
     turning_angle,
 )
 
@@ -383,7 +384,10 @@ class TestSmoothing:
         raster = np.ones((5, 5))
         result = enhanced_least_cost_path(raster, (0, 0), (4, 4))
         assert "smoothed_path" in result
-        assert len(result["smoothed_path"]) >= len(result["path"])
+        assert "straightened_path" in result
+        # After straightening, smoothed_path has at least as many points
+        # as the straightened path (Chaikin can only add points).
+        assert len(result["smoothed_path"]) >= len(result["straightened_path"])
         # Check start/end preserved
         sp = result["smoothed_path"]
         assert sp[0] == (0.0, 0.0)
@@ -449,3 +453,101 @@ class TestScalability:
         assert result["total_cost"] > 0
         for angle in result["turning_angles"]:
             assert angle <= 90.0 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Path straightening (any-angle)
+# ---------------------------------------------------------------------------
+
+
+class TestStraightening:
+    """Verify that straighten_path removes unnecessary grid waypoints."""
+
+    def test_diagonal_straightens_to_two_points(self):
+        """A pure diagonal on a uniform raster should straighten to
+        just start and end (the direct line is clear)."""
+        raster = np.ones((10, 10))
+        result = enhanced_least_cost_path(raster, (0, 0), (9, 9))
+        sp = result["straightened_path"]
+        assert sp[0] == (0.0, 0.0)
+        assert sp[-1] == (9.0, 9.0)
+        # On a uniform raster, all intermediate diagonal points are
+        # redundant — the straight line is clear.
+        assert len(sp) == 2
+
+    def test_horizontal_straightens_to_two_points(self):
+        """A horizontal path on a uniform raster should straighten to
+        just start and end."""
+        raster = np.ones((3, 10))
+        result = enhanced_least_cost_path(raster, (1, 0), (1, 9))
+        sp = result["straightened_path"]
+        assert sp[0] == (1.0, 0.0)
+        assert sp[-1] == (1.0, 9.0)
+        assert len(sp) == 2
+
+    def test_straighten_preserves_endpoints(self):
+        """Start and end must be preserved exactly."""
+        raster = np.ones((8, 8))
+        result = enhanced_least_cost_path(raster, (0, 0), (7, 7))
+        sp = result["straightened_path"]
+        assert sp[0] == (0.0, 0.0)
+        assert sp[-1] == (7.0, 7.0)
+
+    def test_straighten_respects_barriers(self):
+        """Straightening should not skip waypoints needed to go around
+        barriers."""
+        raster = np.ones((5, 5))
+        # Create a horizontal barrier
+        raster[2, 1] = np.nan
+        raster[2, 2] = np.nan
+        raster[2, 3] = np.nan
+        result = enhanced_least_cost_path(raster, (0, 2), (4, 2))
+        sp = result["straightened_path"]
+        assert sp[0] == (0.0, 2.0)
+        assert sp[-1] == (4.0, 2.0)
+        # The straightened path must have more than 2 waypoints because
+        # the direct line crosses the barrier.
+        assert len(sp) > 2
+
+    def test_straighten_fewer_waypoints_than_grid(self):
+        """On a non-axis-aligned route, the straightened path should
+        have fewer waypoints than the grid path."""
+        # Create a raster where the path must go at an odd angle
+        raster = np.ones((20, 10))
+        result = enhanced_least_cost_path(raster, (0, 0), (19, 9))
+        # Grid path has many cells (zigzag between diagonal and cardinal)
+        assert len(result["straightened_path"]) < len(result["path"])
+
+    def test_straightened_path_in_result(self):
+        """Result dict must contain 'straightened_path'."""
+        raster = np.ones((5, 5))
+        result = enhanced_least_cost_path(raster, (0, 0), (4, 4))
+        assert "straightened_path" in result
+
+    def test_straighten_single_cell(self):
+        """Start==end yields a single-point straightened path."""
+        raster = np.ones((3, 3))
+        result = enhanced_least_cost_path(raster, (1, 1), (1, 1))
+        assert result["straightened_path"] == [(1.0, 1.0)]
+
+    def test_straighten_direct(self):
+        """straighten_path can be called directly."""
+        raster = np.ones((5, 5))
+        path = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]
+        sp = straighten_path(path, raster)
+        assert sp[0] == (0.0, 0.0)
+        assert sp[-1] == (4.0, 4.0)
+        assert len(sp) == 2
+
+    def test_straighten_with_curvature(self):
+        """Straightening should also work on direction-aware paths."""
+        raster = np.ones((10, 10))
+        result = enhanced_least_cost_path(
+            raster, (0, 0), (9, 9),
+            curvature_factor=0.5, max_turning_angle=90.0,
+        )
+        sp = result["straightened_path"]
+        assert sp[0] == (0.0, 0.0)
+        assert sp[-1] == (9.0, 9.0)
+        # On a uniform raster the straightened path should be just 2 points
+        assert len(sp) == 2
