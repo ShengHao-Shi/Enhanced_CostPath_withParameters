@@ -176,7 +176,9 @@ def enhanced_least_cost_path(
 
     When ``curvature_factor == 0`` **and** ``max_turning_angle == 180`` the
     algorithm automatically drops direction tracking, reducing memory and
-    run-time to that of a standard Dijkstra LCP.
+    run-time to that of a standard Dijkstra LCP.  A built-in anti-zigzag
+    straightness preference is still applied to prevent lightning-bolt
+    artefacts in uniform-cost corridors.
 
     A **Chaikin corner-cutting** post-processing pass is always applied to
     produce a ``smoothed_path`` with rounded turns instead of sharp corners.
@@ -284,10 +286,21 @@ def _dijkstra_standard(
     step_dists = _step_distances(cell_size)
     scale = _cost_scale(cost_raster)
     dist_weight = distance_factor * scale
+    straight_weight = _STRAIGHTNESS_PENALTY * scale
 
     # A* heuristic weight: admissible lower-bound cost per unit distance.
     cy, cx = cell_size
     h_weight = _min_cost(cost_raster) + dist_weight
+
+    # Pre-compute A* heuristic map to avoid per-cell sqrt calls.
+    r_idx = np.arange(rows, dtype=np.float64)
+    c_idx = np.arange(cols, dtype=np.float64)
+    h_map = (np.sqrt(((r_idx[:, None] - er) * cy) ** 2
+                     + ((c_idx[None, :] - ec) * cx) ** 2)
+             * h_weight).astype(np.float32)
+
+    # Ensure cost raster is contiguous float64 for efficient access.
+    cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
 
     # Use float32 to halve memory (~1.18 GB savings on a 6908×4750 raster).
     best = np.full((rows, cols), np.inf, dtype=np.float32)
@@ -299,15 +312,13 @@ def _dijkstra_standard(
     # Local references to avoid repeated attribute lookups.
     _heappop = heapq.heappop
     _heappush = heapq.heappush
-    _sqrt = math.sqrt
     _isfinite = math.isfinite
     _dirs = DIRECTIONS
 
     # Heap entries: (f, counter, g, r, c) where f = g + h.
     # Storing g explicitly avoids floating-point error from f - h.
     counter = 0
-    h_start = _sqrt(((sr - er) * cy) ** 2 + ((sc - ec) * cx) ** 2) * h_weight
-    pq: List = [(h_start, counter, 0.0, sr, sc)]
+    pq: List = [(float(h_map[sr, sc]), counter, 0.0, sr, sc)]
 
     while pq:
         _, _, g, r, c = _heappop(pq)
@@ -316,16 +327,30 @@ def _dijkstra_standard(
         if r == er and c == ec:
             break
 
+        d_in = int(parent_dir[r, c])
+
         for d in range(NUM_DIRS):
             dr, dc = _dirs[d]
             nr, nc = r + dr, c + dc
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
-            cell_val = float(cost_raster[nr, nc])
+            cell_val = float(cost_data[nr, nc])
             if not _isfinite(cell_val) or cell_val < 0:
                 continue
             sd = step_dists[d]
             new_cost = g + cell_val * sd + dist_weight * sd
+
+            # Anti-zigzag: penalize direction changes when cost variation
+            # is low (going straight would cost about the same).
+            if d_in >= 0 and d != d_in:
+                str_dr, str_dc = _dirs[d_in]
+                str_r, str_c = r + str_dr, c + str_dc
+                if 0 <= str_r < rows and 0 <= str_c < cols:
+                    str_val = float(cost_data[str_r, str_c])
+                    if _isfinite(str_val) and str_val >= 0:
+                        similarity = max(0.0, 1.0 - abs(cell_val - str_val) / scale)
+                        new_cost += similarity * straight_weight * sd
+
             if new_cost < best[nr, nc]:
                 best[nr, nc] = new_cost
                 parent_dir[nr, nc] = d
@@ -335,8 +360,7 @@ def _dijkstra_standard(
                 # in best, preventing false skips when g > best due
                 # to float64→float32 rounding.
                 g_stored = float(best[nr, nc])
-                h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
-                _heappush(pq, (g_stored + h_nb, counter, g_stored, nr, nc))
+                _heappush(pq, (g_stored + float(h_map[nr, nc]), counter, g_stored, nr, nc))
 
     if not np.isfinite(best[er, ec]):
         raise RuntimeError("No path found between start and end")
@@ -372,6 +396,16 @@ def _dijkstra_with_direction(
     cy, cx = cell_size
     h_weight = _min_cost(cost_raster) + dist_weight
 
+    # Pre-compute A* heuristic map to avoid per-cell sqrt calls.
+    r_idx = np.arange(rows, dtype=np.float64)
+    c_idx = np.arange(cols, dtype=np.float64)
+    h_map = (np.sqrt(((r_idx[:, None] - er) * cy) ** 2
+                     + ((c_idx[None, :] - ec) * cx) ** 2)
+             * h_weight).astype(np.float32)
+
+    # Ensure cost raster is contiguous float64 for efficient access.
+    cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
+
     # best_cost shape: (rows, cols, NUM_DIRS + 1)
     # Index NUM_DIRS stores the NO_DIR sentinel for the start cell.
     # Use float32 to halve memory (~1.18 GB savings on a 6908×4750 raster).
@@ -389,7 +423,6 @@ def _dijkstra_with_direction(
     # Local references to avoid repeated attribute lookups.
     _heappop = heapq.heappop
     _heappush = heapq.heappush
-    _sqrt = math.sqrt
     _isfinite = math.isfinite
     _dirs = DIRECTIONS
     _turn_lut = _TURN_ANGLE_LUT
@@ -399,8 +432,7 @@ def _dijkstra_with_direction(
     # Heap entries: (f, counter, g, r, c, d_in) where f = g + h.
     # Storing g explicitly avoids floating-point error from f - h.
     counter = 0
-    h_start = _sqrt(((sr - er) * cy) ** 2 + ((sc - ec) * cx) ** 2) * h_weight
-    pq: List = [(h_start, counter, 0.0, sr, sc, _no_dir)]
+    pq: List = [(float(h_map[sr, sc]), counter, 0.0, sr, sc, _no_dir)]
 
     found = False
     end_state: Optional[Tuple[int, int, int]] = None
@@ -421,7 +453,7 @@ def _dijkstra_with_direction(
             nr, nc = r + dr, c + dc
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
-            cell_val = float(cost_raster[nr, nc])
+            cell_val = float(cost_data[nr, nc])
             if not _isfinite(cell_val) or cell_val < 0:
                 continue
 
@@ -443,7 +475,7 @@ def _dijkstra_with_direction(
                 str_dr, str_dc = _dirs[d_in]
                 str_r, str_c = r + str_dr, c + str_dc
                 if (0 <= str_r < rows and 0 <= str_c < cols):
-                    str_val = float(cost_raster[str_r, str_c])
+                    str_val = float(cost_data[str_r, str_c])
                     if _isfinite(str_val) and str_val >= 0:
                         similarity = max(0.0, 1.0 - abs(cell_val - str_val) / scale)
                         straightness_penalty = similarity * straight_weight * sd
@@ -460,8 +492,7 @@ def _dijkstra_with_direction(
                 # in best, preventing false skips when g > best due
                 # to float64→float32 rounding.
                 g_stored = float(best[nr, nc, nd_idx])
-                h_nb = _sqrt(((nr - er) * cy) ** 2 + ((nc - ec) * cx) ** 2) * h_weight
-                _heappush(pq, (g_stored + h_nb, counter, g_stored, nr, nc, d_out))
+                _heappush(pq, (g_stored + float(h_map[nr, nc]), counter, g_stored, nr, nc, d_out))
 
     if not found:
         raise RuntimeError("No path found between start and end")

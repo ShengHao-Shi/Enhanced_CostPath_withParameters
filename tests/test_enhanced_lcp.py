@@ -319,6 +319,29 @@ class TestStraightness:
         # Should be very few turns on a nearly uniform raster
         assert n_turns <= 3
 
+    def test_standard_dijkstra_straight_corridor(self):
+        """Standard Dijkstra (no curvature params) should prefer a
+        straight path through a uniform-cost horizontal corridor."""
+        raster = np.full((7, 30), 100.0)
+        # Low-cost corridor on rows 2-4
+        raster[2:5, :] = 1.0
+        start, end = (3, 0), (3, 29)
+        result = enhanced_least_cost_path(raster, start, end)
+        path = result["path"]
+        # Path should stay on the center row of the corridor
+        assert all(r == 3 for r, _ in path)
+
+    def test_standard_dijkstra_low_variation_fewer_turns(self):
+        """Standard Dijkstra should have few direction changes on a
+        low-variation raster thanks to the built-in anti-zigzag penalty."""
+        rng = np.random.default_rng(42)
+        raster = 5.0 + rng.uniform(-0.05, 0.05, (20, 20))
+        start, end = (0, 0), (19, 19)
+        result = enhanced_least_cost_path(raster, start, end)
+        n_turns = sum(1 for a in result["turning_angles"] if a > 0)
+        # Should have very few turns on a nearly uniform raster
+        assert n_turns <= 3
+
 
 # ---------------------------------------------------------------------------
 # Path smoothing
