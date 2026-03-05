@@ -111,7 +111,7 @@ def enhanced_least_cost_path(
     curvature_factor: float = 0.0,
     max_turning_angle: float = 180.0,
     distance_factor: float = 0.0,
-    straighten_factor: float = 1.0,
+    straighten_factor: float = 0.3,
     cell_size: Tuple[float, float] = (1.0, 1.0),
 ) -> Dict:
     """Compute an enhanced least cost path on a cost raster.
@@ -140,18 +140,22 @@ def enhanced_least_cost_path(
         cross higher-cost cells.
     straighten_factor : float, optional
         Controls the degree of post-processing path straightening
-        (0.0 – 1.0, default 1.0).
+        (0.0 – 0.5, default 0.3).
 
         * ``0.0`` — no straightening; the ``straightened_path`` output
           is identical to the raw grid ``path``.
-        * ``0.0 < factor < 1.0`` — partial straightening; at each
+        * ``0.0 < factor < 0.5`` — partial straightening; at each
           waypoint the algorithm looks ahead at most
           ``factor × (path_length − 1)`` grid steps.  Lower values
           keep the result closer to the original 8-connected grid path;
           higher values allow longer straight-line shortcuts.
-        * ``1.0`` — full straightening; the algorithm tries to reach as
-          far ahead as line-of-sight allows, producing the fewest
-          possible waypoints.
+        * ``0.5`` — maximum straightening; at each waypoint the
+          algorithm looks ahead up to half the path length,
+          producing a significantly straightened path.
+
+        In practice, values between 0.05 and 0.5 cover the full
+        useful range.  Fine-grained values such as 0.05 are
+        supported for precise control.
 
         In all cases the straightened path never passes through NODATA
         or barrier cells.
@@ -260,9 +264,9 @@ def _validate_params(
         raise ValueError(
             f"distance_factor must be between 0.0 and 1.0, got {distance_factor}"
         )
-    if not 0.0 <= straighten_factor <= 1.0:
+    if not 0.0 <= straighten_factor <= 0.5:
         raise ValueError(
-            f"straighten_factor must be between 0.0 and 1.0, got {straighten_factor}"
+            f"straighten_factor must be between 0.0 and 0.5, got {straighten_factor}"
         )
     rows, cols = cost_raster.shape
     sr, sc = start
@@ -794,7 +798,7 @@ def _is_line_clear(
 def straighten_path(
     path: List[Tuple[int, int]],
     cost_raster: np.ndarray,
-    straighten_factor: float = 1.0,
+    straighten_factor: float = 0.3,
 ) -> List[Tuple[float, float]]:
     """Remove unnecessary waypoints using line-of-sight checks.
 
@@ -809,14 +813,13 @@ def straighten_path(
 
     * ``0.0`` — no straightening at all; the output equals the input grid
       path converted to float coordinates.
-    * ``0.0 < factor < 1.0`` — partial straightening; at each waypoint the
+    * ``0.0 < factor < 0.5`` — partial straightening; at each waypoint the
       algorithm looks ahead at most ``factor × (path_length − 1)`` steps.
       Lower values keep the path closer to the original grid path while
       still removing small-scale zigzag; higher values allow longer
-      straight segments.
-    * ``1.0`` — full straightening; at each waypoint the algorithm tries to
-      reach as far ahead as line-of-sight allows, producing the fewest
-      possible waypoints.
+      straight segments.  Fine-grained values such as 0.05 are supported.
+    * ``0.5`` — maximum straightening; at each waypoint the algorithm
+      looks ahead up to half the path length.
 
     Parameters
     ----------
@@ -826,7 +829,7 @@ def straighten_path(
         The cost raster used for pathfinding.  Cells with ``NaN``, ``Inf``,
         or negative values are treated as barriers.
     straighten_factor : float, optional
-        Controls the degree of path straightening (0.0 – 1.0, default 1.0).
+        Controls the degree of path straightening (0.0 – 0.5, default 0.3).
         See above for semantics.
 
     Returns
@@ -851,10 +854,7 @@ def straighten_path(
     # (the loop searches from i+max_skip down to i+2; with max_skip < 2
     # no skipping would occur and the result would equal the grid path).
     n = len(path)
-    if straighten_factor >= 1.0:
-        max_skip = n - 1  # unlimited
-    else:
-        max_skip = max(2, int(straighten_factor * (n - 1)))
+    max_skip = max(2, int(straighten_factor * (n - 1)))
 
     result_indices: List[int] = [0]
     i = 0
