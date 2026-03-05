@@ -847,6 +847,9 @@ def straighten_path(
     cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
 
     # Maximum lookahead distance (in path-index steps).
+    # Minimum of 2 so that at least one intermediate cell can be skipped
+    # (the loop searches from i+max_skip down to i+2; with max_skip < 2
+    # no skipping would occur and the result would equal the grid path).
     n = len(path)
     if straighten_factor >= 1.0:
         max_skip = n - 1  # unlimited
