@@ -8,6 +8,7 @@ import pytest
 from enhanced_lcp import (
     DIRECTIONS,
     NUM_DIRS,
+    _supercover_line,
     enhanced_least_cost_path,
     smooth_path,
     straighten_path,
@@ -551,3 +552,157 @@ class TestStraightening:
         assert sp[-1] == (9.0, 9.0)
         # On a uniform raster the straightened path should be just 2 points
         assert len(sp) == 2
+
+
+# ---------------------------------------------------------------------------
+# Supercover line & NODATA safety
+# ---------------------------------------------------------------------------
+
+
+class TestSupercover:
+    """Verify that the supercover line algorithm catches NODATA at corners."""
+
+    def test_supercover_includes_corner_cells(self):
+        """A diagonal step from (0,0) to (1,1) should include the two
+        corner-adjacent cells (0,1) and (1,0)."""
+        cells = _supercover_line(0, 0, 1, 1)
+        cell_set = set(cells)
+        assert (0, 0) in cell_set
+        assert (1, 1) in cell_set
+        # Corner cells must be included
+        assert (0, 1) in cell_set
+        assert (1, 0) in cell_set
+
+    def test_supercover_horizontal(self):
+        """Horizontal line should include all cells in the row."""
+        cells = _supercover_line(2, 0, 2, 5)
+        cell_set = set(cells)
+        for c in range(6):
+            assert (2, c) in cell_set
+
+    def test_supercover_vertical(self):
+        """Vertical line should include all cells in the column."""
+        cells = _supercover_line(0, 3, 4, 3)
+        cell_set = set(cells)
+        for r in range(5):
+            assert (r, 3) in cell_set
+
+    def test_supercover_blocks_nodata_at_corner(self):
+        """Straightening must not skip over NODATA at a diagonal corner."""
+        # 3x3 raster with NODATA at (1,0) — right at the corner of
+        # a diagonal from (0,0) to (2,1).
+        raster = np.ones((3, 3))
+        raster[1, 0] = np.nan
+
+        # Direct path (0,0)→(1,1)→(2,1): the Bresenham line from
+        # (0,0) to (2,1) would miss (1,0), but supercover catches it.
+        path = [(0, 0), (1, 1), (2, 1)]
+        sp = straighten_path(path, raster)
+        # With the supercover check, the line (0,0)→(2,1) passes through
+        # the NODATA cell (1,0), so the straightener cannot skip (1,1).
+        assert len(sp) > 2
+
+    def test_straighten_never_crosses_nodata(self):
+        """The straightened path should never shortcut across NODATA.
+
+        When the straightener tries to skip intermediate waypoints, the
+        supercover line check must detect any NODATA cells in the way.
+        (Single-step diagonal moves between adjacent grid cells are valid
+        in 8-connectivity and are not checked by the straightener.)
+        """
+        raster = np.ones((10, 10))
+        # Wide NODATA wall across the middle — forces a detour
+        raster[4, 2:8] = np.nan
+        raster[5, 2:8] = np.nan
+
+        result = enhanced_least_cost_path(raster, (0, 5), (9, 5))
+        sp = result["straightened_path"]
+        assert len(sp) > 2, "Must detour around the NODATA wall"
+
+        # Verify multi-cell straightened segments don't cross NODATA.
+        cost_data = np.ascontiguousarray(raster, dtype=np.float64)
+        for k in range(len(sp) - 1):
+            r0, c0 = int(round(sp[k][0])), int(round(sp[k][1]))
+            r1, c1 = int(round(sp[k + 1][0])), int(round(sp[k + 1][1]))
+            # Only check segments that skip intermediate cells
+            if max(abs(r1 - r0), abs(c1 - c0)) <= 1:
+                continue
+            for r, c in _supercover_line(r0, c0, r1, c1):
+                if 0 <= r < 10 and 0 <= c < 10:
+                    assert np.isfinite(cost_data[r, c]), (
+                        f"Straightened segment ({r0},{c0})→({r1},{c1}) "
+                        f"crosses NODATA at ({r},{c})"
+                    )
+
+
+# ---------------------------------------------------------------------------
+# Straighten factor parameter
+# ---------------------------------------------------------------------------
+
+
+class TestStraightenFactor:
+    """Verify that straighten_factor controls straightening degree."""
+
+    def test_factor_zero_no_straightening(self):
+        """With straighten_factor=0, straightened path == grid path."""
+        raster = np.ones((10, 10))
+        result = enhanced_least_cost_path(
+            raster, (0, 0), (9, 9), straighten_factor=0.0,
+        )
+        # Should have the same number of points as the grid path
+        assert len(result["straightened_path"]) == len(result["path"])
+
+    def test_factor_one_full_straightening(self):
+        """With straighten_factor=1.0, full straightening is applied."""
+        raster = np.ones((10, 10))
+        result = enhanced_least_cost_path(
+            raster, (0, 0), (9, 9), straighten_factor=1.0,
+        )
+        # On a uniform raster, full straightening collapses to 2 points
+        assert len(result["straightened_path"]) == 2
+
+    def test_factor_intermediate_partial_straightening(self):
+        """An intermediate factor should produce more waypoints than
+        factor=1.0 but fewer than factor=0.0 on a long path."""
+        raster = np.ones((30, 30))
+        res_full = enhanced_least_cost_path(
+            raster, (0, 0), (29, 29), straighten_factor=1.0,
+        )
+        res_partial = enhanced_least_cost_path(
+            raster, (0, 0), (29, 29), straighten_factor=0.1,
+        )
+        res_none = enhanced_least_cost_path(
+            raster, (0, 0), (29, 29), straighten_factor=0.0,
+        )
+        assert len(res_full["straightened_path"]) <= len(res_partial["straightened_path"])
+        assert len(res_partial["straightened_path"]) <= len(res_none["straightened_path"])
+
+    def test_factor_validation(self):
+        """Invalid straighten_factor should raise ValueError."""
+        raster = np.ones((5, 5))
+        with pytest.raises(ValueError, match="straighten_factor"):
+            enhanced_least_cost_path(raster, (0, 0), (4, 4),
+                                     straighten_factor=1.5)
+        with pytest.raises(ValueError, match="straighten_factor"):
+            enhanced_least_cost_path(raster, (0, 0), (4, 4),
+                                     straighten_factor=-0.1)
+
+    def test_factor_with_curvature(self):
+        """straighten_factor should work with curvature parameters."""
+        raster = np.ones((10, 10))
+        result = enhanced_least_cost_path(
+            raster, (0, 0), (9, 9),
+            curvature_factor=0.5, max_turning_angle=90.0,
+            straighten_factor=0.0,
+        )
+        # With factor=0, straightened path equals grid path
+        assert len(result["straightened_path"]) == len(result["path"])
+
+    def test_straighten_direct_with_factor(self):
+        """straighten_path called directly respects straighten_factor."""
+        raster = np.ones((5, 5))
+        path = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]
+        sp_full = straighten_path(path, raster, straighten_factor=1.0)
+        sp_none = straighten_path(path, raster, straighten_factor=0.0)
+        assert len(sp_full) == 2   # collapsed to start+end
+        assert len(sp_none) == 5   # same as input

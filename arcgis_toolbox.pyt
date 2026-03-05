@@ -132,7 +132,20 @@ class EnhancedLeastCostPathTool:
         p_dist.filter.list = [0.0, 1.0]
         params.append(p_dist)
 
-        # 6 – Output path feature class
+        # 6 – Straighten factor
+        p_straighten = arcpy.Parameter(
+            displayName="Straighten Factor (0.0 – 1.0)",
+            name="straighten_factor",
+            datatype="GPDouble",
+            parameterType="Optional",
+            direction="Input",
+        )
+        p_straighten.value = 1.0
+        p_straighten.filter.type = "Range"
+        p_straighten.filter.list = [0.0, 1.0]
+        params.append(p_straighten)
+
+        # 7 – Output path feature class
         p_out = arcpy.Parameter(
             displayName="Output Path Feature Class",
             name="output_path",
@@ -173,7 +186,9 @@ class EnhancedLeastCostPathTool:
         max_turning_angle_val = parameters[4].value
         max_turning_angle = float(max_turning_angle_val if max_turning_angle_val is not None else 180.0)
         distance_factor = float(parameters[5].value or 0.0)
-        output_fc = parameters[6].valueAsText
+        straighten_factor_val = parameters[6].value
+        straighten_factor = float(straighten_factor_val if straighten_factor_val is not None else 1.0)
+        output_fc = parameters[7].valueAsText
 
         # --- Read cost raster via arcpy ------------------------------------
         raster = arcpy.Raster(cost_raster_path)
@@ -206,6 +221,7 @@ class EnhancedLeastCostPathTool:
             curvature_factor=curvature_factor,
             max_turning_angle=max_turning_angle,
             distance_factor=distance_factor,
+            straighten_factor=straighten_factor,
             cell_size=(cell_y, cell_x),
         )
 
