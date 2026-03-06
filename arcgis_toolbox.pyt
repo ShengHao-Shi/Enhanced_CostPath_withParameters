@@ -665,3 +665,6 @@ class CostAwareStraightenedLCPTool:
         _write_polyline(result["smoothed_path"], extent, cell_x, cell_y,
                         sr, output_fc)
         messages.addMessage(f"Output written to {output_fc}")
+
+    def postExecute(self, parameters):  # noqa: N802
+        return
