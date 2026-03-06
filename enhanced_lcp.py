@@ -594,7 +594,7 @@ def _build_result(
     return {
         "path": path,
         "straightened_path": straightened,
-        "smoothed_path": smooth_path(straightened),
+        "smoothed_path": _smooth_path_nodata_safe(straightened, cost_raster),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -656,7 +656,7 @@ def _build_result_directed(
     return {
         "path": path,
         "straightened_path": straightened,
-        "smoothed_path": smooth_path(straightened),
+        "smoothed_path": _smooth_path_nodata_safe(straightened, cost_raster),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -716,6 +716,48 @@ def smooth_path(
         pts = new_pts
 
     return pts
+
+
+def _smooth_path_nodata_safe(
+    straightened: List[Tuple[float, float]],
+    cost_raster: np.ndarray,
+    iterations: int = 3,
+) -> List[Tuple[float, float]]:
+    """Smooth *straightened* via Chaikin, falling back when NODATA is crossed.
+
+    After Chaikin corner-cutting, each segment of the smoothed path is
+    validated against the cost raster using the supercover line algorithm.
+    If any segment crosses a NODATA / barrier cell, the function returns
+    the original *straightened* path unchanged so that the output never
+    passes through impassable areas.
+    """
+    smoothed = smooth_path(straightened, iterations)
+
+    if len(smoothed) <= 2:
+        return smoothed
+
+    rows, cols = cost_raster.shape
+    cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
+    _isfinite = math.isfinite
+
+    for i in range(len(smoothed) - 1):
+        r0 = int(round(smoothed[i][0]))
+        c0 = int(round(smoothed[i][1]))
+        r1 = int(round(smoothed[i + 1][0]))
+        c1 = int(round(smoothed[i + 1][1]))
+        # Clamp to raster bounds
+        r0 = max(0, min(rows - 1, r0))
+        c0 = max(0, min(cols - 1, c0))
+        r1 = max(0, min(rows - 1, r1))
+        c1 = max(0, min(cols - 1, c1))
+        for r, c in _supercover_line(r0, c0, r1, c1):
+            if not (0 <= r < rows and 0 <= c < cols):
+                return list(straightened)
+            val = float(cost_data[r, c])
+            if not _isfinite(val) or val < 0:
+                return list(straightened)
+
+    return smoothed
 
 
 # ---------------------------------------------------------------------------

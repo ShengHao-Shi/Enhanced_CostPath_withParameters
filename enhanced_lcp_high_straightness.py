@@ -357,7 +357,8 @@ def _dijkstra_standard(
     if not np.isfinite(best[er, ec]):
         raise RuntimeError("No path found between start and end")
 
-    return _build_result(parent_dir, start, end, best[er, ec], cell_size)
+    return _build_result(parent_dir, start, end, best[er, ec], cell_size,
+                         cost_raster)
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +490,8 @@ def _dijkstra_with_direction(
     if not found:
         raise RuntimeError("No path found between start and end")
 
-    return _build_result_directed(parent_d, end_state, best, cell_size)
+    return _build_result_directed(parent_d, end_state, best, cell_size,
+                                  cost_raster)
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +505,7 @@ def _build_result(
     end: Tuple[int, int],
     total_cost: float,
     cell_size: Tuple[float, float],
+    cost_raster: np.ndarray,
 ) -> Dict:
     """Reconstruct path for the standard (non-directional) Dijkstra."""
     path: List[Tuple[int, int]] = []
@@ -535,7 +538,9 @@ def _build_result(
 
     return {
         "path": path,
-        "smoothed_path": smooth_path(path),
+        "smoothed_path": _smooth_path_nodata_safe(
+            smooth_path(path), path, cost_raster
+        ),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -548,6 +553,7 @@ def _build_result_directed(
     end_state: Tuple[int, int, int],
     best: np.ndarray,
     cell_size: Tuple[float, float],
+    cost_raster: np.ndarray,
 ) -> Dict:
     """Reconstruct path for the direction-aware Dijkstra.
 
@@ -592,7 +598,9 @@ def _build_result_directed(
 
     return {
         "path": path,
-        "smoothed_path": smooth_path(path),
+        "smoothed_path": _smooth_path_nodata_safe(
+            smooth_path(path), path, cost_raster
+        ),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -652,6 +660,83 @@ def smooth_path(
         pts = new_pts
 
     return pts
+
+
+def _supercover_line(
+    r0: int, c0: int, r1: int, c1: int,
+) -> List[Tuple[int, int]]:
+    """Return **all** grid cells that the line segment (r0,c0)→(r1,c1)
+    passes through, including both corner-adjacent cells at diagonal steps.
+    """
+    cells: List[Tuple[int, int]] = []
+    dr = abs(r1 - r0)
+    dc = abs(c1 - c0)
+    r, c = r0, c0
+    sr = 1 if r0 < r1 else -1
+    sc = 1 if c0 < c1 else -1
+    err = dr - dc
+
+    while True:
+        cells.append((r, c))
+        if r == r1 and c == c1:
+            break
+        e2 = 2 * err
+        step_r = e2 > -dc
+        step_c = e2 < dr
+
+        if step_r and step_c:
+            cells.append((r + sr, c))
+            cells.append((r, c + sc))
+            err -= dc
+            r += sr
+            err += dr
+            c += sc
+        elif step_r:
+            err -= dc
+            r += sr
+        else:
+            err += dr
+            c += sc
+
+    return cells
+
+
+def _smooth_path_nodata_safe(
+    smoothed: List[Tuple[float, float]],
+    fallback: List[Tuple[int, int]],
+    cost_raster: np.ndarray,
+) -> List[Tuple[float, float]]:
+    """Return *smoothed* if it avoids NODATA, otherwise *fallback* as floats.
+
+    Each segment of the Chaikin-smoothed path is validated against the cost
+    raster using the supercover line algorithm.  If any segment crosses a
+    NODATA / barrier cell, the function returns *fallback* (the original
+    grid path) converted to float coordinates.
+    """
+    if len(smoothed) <= 2:
+        return smoothed
+
+    rows, cols = cost_raster.shape
+    cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
+    _isfinite = math.isfinite
+
+    for i in range(len(smoothed) - 1):
+        r0 = int(round(smoothed[i][0]))
+        c0 = int(round(smoothed[i][1]))
+        r1 = int(round(smoothed[i + 1][0]))
+        c1 = int(round(smoothed[i + 1][1]))
+        r0 = max(0, min(rows - 1, r0))
+        c0 = max(0, min(cols - 1, c0))
+        r1 = max(0, min(rows - 1, r1))
+        c1 = max(0, min(cols - 1, c1))
+        for r, c in _supercover_line(r0, c0, r1, c1):
+            if not (0 <= r < rows and 0 <= c < cols):
+                return [(float(r), float(c)) for r, c in fallback]
+            val = float(cost_data[r, c])
+            if not _isfinite(val) or val < 0:
+                return [(float(r), float(c)) for r, c in fallback]
+
+    return smoothed
 
 
 # ---------------------------------------------------------------------------

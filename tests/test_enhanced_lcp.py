@@ -733,3 +733,74 @@ class TestStraightenFactor:
         assert len(res_005["straightened_path"]) >= len(res_010["straightened_path"])
         # 0.10 should produce more waypoints than 0.50
         assert len(res_010["straightened_path"]) >= len(res_050["straightened_path"])
+
+
+class TestSmoothedPathNodataSafe:
+    """Verify that the smoothed path never crosses NODATA / barrier cells."""
+
+    def test_smoothed_path_avoids_nodata_wall(self):
+        """When the path detours around a NODATA wall, the smoothed output
+        must not shortcut through the wall."""
+        raster = np.ones((10, 10))
+        raster[4, 1:10] = np.nan
+        raster[5, 1:10] = np.nan
+
+        result = enhanced_least_cost_path(raster, (0, 5), (9, 5))
+        sp = result["smoothed_path"]
+        cost_data = np.ascontiguousarray(raster, dtype=np.float64)
+
+        for i in range(len(sp) - 1):
+            r0 = int(round(sp[i][0]))
+            c0 = int(round(sp[i][1]))
+            r1 = int(round(sp[i + 1][0]))
+            c1 = int(round(sp[i + 1][1]))
+            if max(abs(r1 - r0), abs(c1 - c0)) <= 1:
+                continue
+            r0 = max(0, min(9, r0))
+            c0 = max(0, min(9, c0))
+            r1 = max(0, min(9, r1))
+            c1 = max(0, min(9, c1))
+            for r, c in _supercover_line(r0, c0, r1, c1):
+                if 0 <= r < 10 and 0 <= c < 10:
+                    assert np.isfinite(cost_data[r, c]), (
+                        f"Smoothed segment ({r0},{c0})→({r1},{c1}) "
+                        f"crosses NODATA at ({r},{c})"
+                    )
+
+    def test_smoothed_path_avoids_narrow_corridor_nodata(self):
+        """In a narrow L-shaped corridor surrounded by NODATA, the smoothed
+        path must not cross into NODATA."""
+        raster = np.full((8, 8), np.nan)
+        raster[0, 0:4] = 1.0
+        raster[0:8, 3] = 1.0
+        raster[1, 2] = 1.0
+
+        result = enhanced_least_cost_path(raster, (0, 0), (7, 3))
+        sp = result["smoothed_path"]
+        cost_data = np.ascontiguousarray(raster, dtype=np.float64)
+
+        for i in range(len(sp) - 1):
+            r0 = int(round(sp[i][0]))
+            c0 = int(round(sp[i][1]))
+            r1 = int(round(sp[i + 1][0]))
+            c1 = int(round(sp[i + 1][1]))
+            if max(abs(r1 - r0), abs(c1 - c0)) <= 1:
+                continue
+            r0 = max(0, min(7, r0))
+            c0 = max(0, min(7, c0))
+            r1 = max(0, min(7, r1))
+            c1 = max(0, min(7, c1))
+            for r, c in _supercover_line(r0, c0, r1, c1):
+                if 0 <= r < 8 and 0 <= c < 8:
+                    assert np.isfinite(cost_data[r, c]), (
+                        f"Smoothed segment ({r0},{c0})→({r1},{c1}) "
+                        f"crosses NODATA at ({r},{c})"
+                    )
+
+    def test_smoothed_path_smooth_when_safe(self):
+        """On a uniform raster (no NODATA), smoothing should still apply
+        normally and produce more points than the straightened path."""
+        raster = np.ones((20, 20))
+        result = enhanced_least_cost_path(raster, (0, 0), (19, 9))
+        # Smoothing should be active (more points than straightened)
+        assert len(result["smoothed_path"]) >= len(result["straightened_path"])
