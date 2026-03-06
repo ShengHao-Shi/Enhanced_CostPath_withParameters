@@ -538,9 +538,7 @@ def _build_result(
 
     return {
         "path": path,
-        "smoothed_path": _smooth_path_nodata_safe(
-            smooth_path(path), path, cost_raster
-        ),
+        "smoothed_path": _smooth_path_nodata_safe(path, cost_raster),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -598,9 +596,7 @@ def _build_result_directed(
 
     return {
         "path": path,
-        "smoothed_path": _smooth_path_nodata_safe(
-            smooth_path(path), path, cost_raster
-        ),
+        "smoothed_path": _smooth_path_nodata_safe(path, cost_raster),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -702,17 +698,20 @@ def _supercover_line(
 
 
 def _smooth_path_nodata_safe(
-    smoothed: List[Tuple[float, float]],
-    fallback: List[Tuple[int, int]],
+    path: List[Tuple[int, int]],
     cost_raster: np.ndarray,
+    iterations: int = 3,
 ) -> List[Tuple[float, float]]:
-    """Return *smoothed* if it avoids NODATA, otherwise *fallback* as floats.
+    """Smooth *path* via Chaikin, falling back when NODATA is crossed.
 
-    Each segment of the Chaikin-smoothed path is validated against the cost
-    raster using the supercover line algorithm.  If any segment crosses a
-    NODATA / barrier cell, the function returns *fallback* (the original
-    grid path) converted to float coordinates.
+    After Chaikin corner-cutting, each segment of the smoothed path is
+    validated against the cost raster using the supercover line algorithm.
+    If any segment crosses a NODATA / barrier cell, the function returns
+    the original *path* as float coordinates so that the output never
+    passes through impassable areas.
     """
+    smoothed = smooth_path(path, iterations)
+
     if len(smoothed) <= 2:
         return smoothed
 
@@ -731,10 +730,10 @@ def _smooth_path_nodata_safe(
         c1 = max(0, min(cols - 1, c1))
         for r, c in _supercover_line(r0, c0, r1, c1):
             if not (0 <= r < rows and 0 <= c < cols):
-                return [(float(r), float(c)) for r, c in fallback]
+                return [(float(r), float(c)) for r, c in path]
             val = float(cost_data[r, c])
             if not _isfinite(val) or val < 0:
-                return [(float(r), float(c)) for r, c in fallback]
+                return [(float(r), float(c)) for r, c in path]
 
     return smoothed
 
