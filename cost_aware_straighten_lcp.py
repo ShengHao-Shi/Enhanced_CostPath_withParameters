@@ -285,7 +285,7 @@ def _dijkstra_standard(
         raise RuntimeError("No path found between start and end")
 
     return _build_result(parent_dir, start, end, best, float(best[er, ec]),
-                         cell_size, cost_raster, straighten_factor,
+                         cell_size, cost_data, straighten_factor,
                          cost_tolerance)
 
 
@@ -399,7 +399,7 @@ def _dijkstra_with_direction(
         raise RuntimeError("No path found between start and end")
 
     return _build_result_directed(parent_d, end_state, best, cell_size,
-                                   cost_raster, straighten_factor,
+                                   cost_data, straighten_factor,
                                    cost_tolerance)
 
 
@@ -536,6 +536,25 @@ def _line_cost(
 
     Returns ``inf`` if the line crosses a barrier.
     """
+    return _line_cost_or_inf(p0, p1, cost_data, rows, cols, cell_size)
+
+
+def _line_cost_or_inf(
+    p0: Tuple[int, int],
+    p1: Tuple[int, int],
+    cost_data: np.ndarray,
+    rows: int,
+    cols: int,
+    cell_size: Tuple[float, float],
+) -> float:
+    """Check line clearance and compute cost in a single pass.
+
+    Combines the logic of ``_is_line_clear`` and ``_line_cost`` to avoid
+    computing the supercover line twice for the same segment.
+
+    Returns ``inf`` if the line crosses a barrier or out-of-bounds cell,
+    otherwise returns ``avg_cost * euclidean_distance``.
+    """
     _isfinite = math.isfinite
     cells = _supercover_line(p0[0], p0[1], p1[0], p1[1])
     n = len(cells)
@@ -609,7 +628,13 @@ def cost_aware_straighten_path(
         return [(float(r), float(c)) for r, c in path]
 
     rows, cols = cost_raster.shape
-    cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
+    # Accept pre-converted cost_data if the caller already has one;
+    # otherwise convert here.  This avoids a redundant copy when called
+    # from _build_result / _build_result_directed.
+    if cost_raster.dtype == np.float64 and cost_raster.flags["C_CONTIGUOUS"]:
+        cost_data = cost_raster
+    else:
+        cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
 
     n = len(path)
     max_skip = max(2, int(straighten_factor * (n - 1)))
@@ -635,15 +660,16 @@ def cost_aware_straighten_path(
         j_limit = min(n - 1, i + max_skip)
         best_j = i + 1
         for j in range(j_limit, i + 1, -1):
-            # Check 1: line must be free of barriers
-            if not _is_line_clear(path[i], path[j], cost_data, rows, cols):
-                continue
-
-            # Check 2: shortcut cost must be within tolerance of original
-            orig_segment_cost = cum_cost[j] - cum_cost[i]
-            shortcut_cost = _line_cost(
+            # Combined barrier check + cost computation in one pass
+            # (avoids computing the supercover line twice).
+            shortcut_cost = _line_cost_or_inf(
                 path[i], path[j], cost_data, rows, cols, cell_size
             )
+            if math.isinf(shortcut_cost):
+                continue
+
+            # Shortcut cost must be within tolerance of original
+            orig_segment_cost = cum_cost[j] - cum_cost[i]
 
             # Avoid division by zero for zero-cost segments
             if orig_segment_cost <= 0:
