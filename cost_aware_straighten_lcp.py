@@ -535,6 +535,9 @@ def _line_cost(
     """Compute cost of travelling along the straight line from p0 to p1.
 
     Returns ``inf`` if the line crosses a barrier.
+
+    .. note:: Kept as a thin wrapper around ``_line_cost_or_inf`` for
+       backward compatibility (external callers / tests may import it).
     """
     return _line_cost_or_inf(p0, p1, cost_data, rows, cols, cell_size)
 
