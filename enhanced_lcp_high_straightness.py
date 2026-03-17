@@ -1,33 +1,18 @@
 """
-Enhanced Least Cost Path Algorithm
-===================================
+Enhanced Least Cost Path Algorithm – HIGH STRAIGHTNESS EXPERIMENT
+=================================================================
 
-Extends the standard Least Cost Path (LCP) algorithm with two additional
-controls beyond the basic cost raster, start point, and end point:
+**This is an experimental copy of ``enhanced_lcp.py``.**  The only
+change is a dramatically increased ``_STRAIGHTNESS_PENALTY`` (from 0.3
+to 5.0) and ``_CURVATURE_AMPLIFIER`` (from 5.0 to 20.0).  The goal is
+to test whether heavily penalizing direction changes eliminates the
+"lightning-bolt" zigzag artifacts that appear in uniform-cost corridors.
 
-1. **Curvature Control**: Penalizes sharp turns to produce smoother paths.
-   - ``curvature_factor`` (0.0-1.0): Soft penalty weight for turns.
-   - ``max_turning_angle`` (0-180 degrees): Hard limit on allowed turn angles.
-     Lower values enforce gentler turns.
-   - Built-in anti-zigzag preference that favours straight-line continuation
-     when the cost surface varies little.
+Do **not** replace ``enhanced_lcp.py`` with this file.  Instead, import
+or swap this module in ArcGIS to compare the resulting paths against the
+baseline.
 
-2. **Distance Factor**: Weights path length as an additional cost component,
-   encouraging shorter paths when set above zero.
-
-3. **Any-Angle Path Straightening**: After computing the grid-cell path,
-   a line-of-sight post-processing step removes unnecessary waypoints,
-   allowing the path to travel at any angle — not just the 8 grid-aligned
-   directions.  This eliminates the "lightning-bolt" zigzag artifacts
-   inherent to grid-based pathfinding.
-
-4. **Path Smoothing**: After straightening, Chaikin's corner-cutting
-   algorithm is applied to produce a smooth curve that replaces any
-   remaining sharp corners with rounded arcs.
-
-The algorithm uses a modified Dijkstra's search on a raster grid with
-8-connectivity. When curvature control is active, the search state includes
-the incoming travel direction so that turning angles can be computed.
+All other behaviour is identical to the original module.
 
 Dependencies: numpy (required), rasterio (optional, for file I/O).
 """
@@ -59,11 +44,12 @@ NUM_DIRS: int = len(DIRECTIONS)
 NO_DIR: int = -1
 
 # Internal amplifier so that curvature_factor in [0, 1] has a visible effect.
-_CURVATURE_AMPLIFIER: float = 5.0
+_CURVATURE_AMPLIFIER: float = 20.0
 
 # Straightness penalty multiplier applied when changing direction and
 # the straight-ahead cell has similar cost.  Reduces zigzag artefacts.
-_STRAIGHTNESS_PENALTY: float = 0.3
+# EXPERIMENT: increased from 0.3 to 5.0 (≈16× the original value).
+_STRAIGHTNESS_PENALTY: float = 5.0
 
 
 def turning_angle(dir_from: int, dir_to: int) -> float:
@@ -111,7 +97,6 @@ def enhanced_least_cost_path(
     curvature_factor: float = 0.0,
     max_turning_angle: float = 180.0,
     distance_factor: float = 0.0,
-    straighten_factor: float = 0.3,
     cell_size: Tuple[float, float] = (1.0, 1.0),
 ) -> Dict:
     """Compute an enhanced least cost path on a cost raster.
@@ -138,27 +123,6 @@ def enhanced_least_cost_path(
         Weight for raw path length in the cost function (0.0 – 1.0,
         default 0.0).  Higher values encourage shorter paths even if they
         cross higher-cost cells.
-    straighten_factor : float, optional
-        Controls the degree of post-processing path straightening
-        (0.0 – 0.5, default 0.3).
-
-        * ``0.0`` — no straightening; the ``straightened_path`` output
-          is identical to the raw grid ``path``.
-        * ``0.0 < factor < 0.5`` — partial straightening; at each
-          waypoint the algorithm looks ahead at most
-          ``factor × (path_length − 1)`` grid steps.  Lower values
-          keep the result closer to the original 8-connected grid path;
-          higher values allow longer straight-line shortcuts.
-        * ``0.5`` — maximum straightening; at each waypoint the
-          algorithm looks ahead up to half the path length,
-          producing a significantly straightened path.
-
-        In practice, values between 0.05 and 0.5 cover the full
-        useful range.  Fine-grained values such as 0.05 are
-        supported for precise control.
-
-        In all cases the straightened path never passes through NODATA
-        or barrier cells.
     cell_size : tuple[float, float], optional
         ``(y_size, x_size)`` of each raster cell in map units.
         Default ``(1.0, 1.0)``.
@@ -166,17 +130,13 @@ def enhanced_least_cost_path(
     Returns
     -------
     dict
-        ``path``              – list of ``(row, col)`` tuples from start to end
-                                (grid cells, 8-connected).
-        ``straightened_path`` – path after line-of-sight straightening removes
-                                unnecessary waypoints, allowing any-angle travel.
-        ``smoothed_path``     – Chaikin-smoothed version of the straightened
-                                path with rounded turns.
-        ``total_cost``        – accumulated cost along the optimal grid path.
-        ``path_length``       – physical length of the grid path in map units.
-        ``directions``        – direction index at each grid-path step.
-        ``turning_angles``    – turning angle (degrees) at each interior vertex
-                                of the grid path.
+        ``path``            – list of ``(row, col)`` tuples from start to end.
+        ``smoothed_path``   – list of ``(row, col)`` float tuples after
+                              Chaikin corner-cutting smoothing.
+        ``total_cost``      – accumulated cost along the optimal path.
+        ``path_length``     – physical length of the path in map units.
+        ``directions``      – direction index at each step.
+        ``turning_angles``  – turning angle (degrees) at each interior vertex.
 
     Raises
     ------
@@ -203,7 +163,7 @@ def enhanced_least_cost_path(
     where *cost_scale* is the mean of all finite cost-raster values,
     *similarity* measures how close the target-cell cost is to the
     straight-ahead cell cost (1 when equal, 0 when very different), and
-    *amplifier* is an internal constant (5.0) that ensures ``curvature_factor``
+    *amplifier* is an internal constant (20.0) that ensures ``curvature_factor``
     values between 0 and 1 produce a noticeable effect.
 
     When ``curvature_factor == 0`` **and** ``max_turning_angle == 180`` the
@@ -212,15 +172,12 @@ def enhanced_least_cost_path(
     straightness preference is still applied to prevent lightning-bolt
     artefacts in uniform-cost corridors.
 
-    After the grid path is found, a **line-of-sight straightening** pass
-    (controlled by ``straighten_factor``) removes unnecessary waypoints,
-    allowing the path to travel at any angle instead of only the 8
-    grid-aligned directions.  A **Chaikin corner-cutting** smoothing pass
-    is then applied to the straightened path to produce rounded turns.
+    A **Chaikin corner-cutting** post-processing pass is always applied to
+    produce a ``smoothed_path`` with rounded turns instead of sharp corners.
     """
     # ---- Validate inputs --------------------------------------------------
     _validate_params(cost_raster, start, end, curvature_factor,
-                     max_turning_angle, distance_factor, straighten_factor)
+                     max_turning_angle, distance_factor)
 
     use_curvature = curvature_factor > 0.0 or max_turning_angle < 180.0
 
@@ -228,11 +185,9 @@ def enhanced_least_cost_path(
         return _dijkstra_with_direction(
             cost_raster, start, end,
             curvature_factor, max_turning_angle, distance_factor, cell_size,
-            straighten_factor,
         )
     return _dijkstra_standard(
         cost_raster, start, end, distance_factor, cell_size,
-        straighten_factor,
     )
 
 
@@ -248,7 +203,6 @@ def _validate_params(
     curvature_factor: float,
     max_turning_angle: float,
     distance_factor: float,
-    straighten_factor: float,
 ) -> None:
     if cost_raster.ndim != 2:
         raise ValueError("cost_raster must be a 2-D array")
@@ -263,10 +217,6 @@ def _validate_params(
     if not 0.0 <= distance_factor <= 1.0:
         raise ValueError(
             f"distance_factor must be between 0.0 and 1.0, got {distance_factor}"
-        )
-    if not 0.0 <= straighten_factor <= 0.5:
-        raise ValueError(
-            f"straighten_factor must be between 0.0 and 0.5, got {straighten_factor}"
         )
     rows, cols = cost_raster.shape
     sr, sc = start
@@ -320,7 +270,6 @@ def _dijkstra_standard(
     end: Tuple[int, int],
     distance_factor: float,
     cell_size: Tuple[float, float],
-    straighten_factor: float,
 ) -> Dict:
     rows, cols = cost_raster.shape
     sr, sc = start
@@ -409,7 +358,7 @@ def _dijkstra_standard(
         raise RuntimeError("No path found between start and end")
 
     return _build_result(parent_dir, start, end, best[er, ec], cell_size,
-                        cost_raster, straighten_factor)
+                         cost_raster)
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +374,6 @@ def _dijkstra_with_direction(
     max_turning_angle: float,
     distance_factor: float,
     cell_size: Tuple[float, float],
-    straighten_factor: float,
 ) -> Dict:
     rows, cols = cost_raster.shape
     sr, sc = start
@@ -543,7 +491,7 @@ def _dijkstra_with_direction(
         raise RuntimeError("No path found between start and end")
 
     return _build_result_directed(parent_d, end_state, best, cell_size,
-                                   cost_raster, straighten_factor)
+                                  cost_raster)
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +506,6 @@ def _build_result(
     total_cost: float,
     cell_size: Tuple[float, float],
     cost_raster: np.ndarray,
-    straighten_factor: float,
 ) -> Dict:
     """Reconstruct path for the standard (non-directional) Dijkstra."""
     path: List[Tuple[int, int]] = []
@@ -589,12 +536,9 @@ def _build_result(
     for i in range(1, len(directions)):
         turning_angles.append(turning_angle(directions[i - 1], directions[i]))
 
-    straightened = straighten_path(path, cost_raster, straighten_factor)
-
     return {
         "path": path,
-        "straightened_path": straightened,
-        "smoothed_path": _smooth_path_nodata_safe(straightened, cost_raster),
+        "smoothed_path": _smooth_path_nodata_safe(path, cost_raster),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -608,7 +552,6 @@ def _build_result_directed(
     best: np.ndarray,
     cell_size: Tuple[float, float],
     cost_raster: np.ndarray,
-    straighten_factor: float,
 ) -> Dict:
     """Reconstruct path for the direction-aware Dijkstra.
 
@@ -651,12 +594,9 @@ def _build_result_directed(
     ed_idx = ed if ed >= 0 else NUM_DIRS
     total_cost = float(best[er, ec, ed_idx])
 
-    straightened = straighten_path(path, cost_raster, straighten_factor)
-
     return {
         "path": path,
-        "straightened_path": straightened,
-        "smoothed_path": _smooth_path_nodata_safe(straightened, cost_raster),
+        "smoothed_path": _smooth_path_nodata_safe(path, cost_raster),
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -718,64 +658,11 @@ def smooth_path(
     return pts
 
 
-def _smooth_path_nodata_safe(
-    straightened: List[Tuple[float, float]],
-    cost_raster: np.ndarray,
-    iterations: int = 3,
-) -> List[Tuple[float, float]]:
-    """Smooth *straightened* via Chaikin, falling back when NODATA is crossed.
-
-    After Chaikin corner-cutting, each segment of the smoothed path is
-    validated against the cost raster using the supercover line algorithm.
-    If any segment crosses a NODATA / barrier cell, the function returns
-    the original *straightened* path unchanged so that the output never
-    passes through impassable areas.
-    """
-    smoothed = smooth_path(straightened, iterations)
-
-    if len(smoothed) <= 2:
-        return smoothed
-
-    rows, cols = cost_raster.shape
-    cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
-    _isfinite = math.isfinite
-
-    for i in range(len(smoothed) - 1):
-        r0 = int(round(smoothed[i][0]))
-        c0 = int(round(smoothed[i][1]))
-        r1 = int(round(smoothed[i + 1][0]))
-        c1 = int(round(smoothed[i + 1][1]))
-        # Clamp to raster bounds
-        r0 = max(0, min(rows - 1, r0))
-        c0 = max(0, min(cols - 1, c0))
-        r1 = max(0, min(rows - 1, r1))
-        c1 = max(0, min(cols - 1, c1))
-        for r, c in _supercover_line(r0, c0, r1, c1):
-            if not (0 <= r < rows and 0 <= c < cols):
-                return list(straightened)
-            val = float(cost_data[r, c])
-            if not _isfinite(val) or val < 0:
-                return list(straightened)
-
-    return smoothed
-
-
-# ---------------------------------------------------------------------------
-# Any-angle path straightening (line-of-sight)
-# ---------------------------------------------------------------------------
-
-
 def _supercover_line(
     r0: int, c0: int, r1: int, c1: int,
 ) -> List[Tuple[int, int]]:
     """Return **all** grid cells that the line segment (r0,c0)→(r1,c1)
-    passes through.
-
-    Unlike the standard Bresenham algorithm (which produces a thin 1-pixel
-    line and may miss cells at diagonal steps), this "supercover" variant
-    also includes both cells adjacent to a grid-cell corner whenever the
-    line crosses that corner diagonally.  This ensures that no NODATA cell
-    is silently skipped during line-of-sight checks.
+    passes through, including both corner-adjacent cells at diagonal steps.
     """
     cells: List[Tuple[int, int]] = []
     dr = abs(r1 - r0)
@@ -794,9 +681,6 @@ def _supercover_line(
         step_c = e2 < dr
 
         if step_r and step_c:
-            # Diagonal step — the line passes through a cell corner.
-            # Include both corner-adjacent cells so that NODATA cells
-            # at the corner are not missed.
             cells.append((r + sr, c))
             cells.append((r, c + sc))
             err -= dc
@@ -813,106 +697,45 @@ def _supercover_line(
     return cells
 
 
-def _is_line_clear(
-    p0: Tuple[int, int],
-    p1: Tuple[int, int],
-    cost_data: np.ndarray,
-    rows: int,
-    cols: int,
-) -> bool:
-    """Check if the line from *p0* to *p1* is free of barriers.
-
-    Uses the supercover line algorithm so that every cell the geometric
-    line segment intersects is tested — including both cells at diagonal
-    corners.  A cell is considered a barrier if it is outside the raster
-    bounds, ``NaN``, ``Inf``, or negative.
-    """
-    _isfinite = math.isfinite
-    for r, c in _supercover_line(p0[0], p0[1], p1[0], p1[1]):
-        if not (0 <= r < rows and 0 <= c < cols):
-            return False
-        val = float(cost_data[r, c])
-        if not _isfinite(val) or val < 0:
-            return False
-    return True
-
-
-def straighten_path(
+def _smooth_path_nodata_safe(
     path: List[Tuple[int, int]],
     cost_raster: np.ndarray,
-    straighten_factor: float = 0.3,
+    iterations: int = 3,
 ) -> List[Tuple[float, float]]:
-    """Remove unnecessary waypoints using line-of-sight checks.
+    """Smooth *path* via Chaikin, falling back when NODATA is crossed.
 
-    After grid-based pathfinding produces a path constrained to 8-connected
-    moves, this function "pulls the string tight" by checking whether
-    intermediate waypoints can be skipped.  Two waypoints can be connected
-    directly if the line between them passes only through traversable
-    (finite, non-negative) cells.
-
-    The ``straighten_factor`` parameter controls how aggressively the
-    algorithm straightens the path:
-
-    * ``0.0`` — no straightening at all; the output equals the input grid
-      path converted to float coordinates.
-    * ``0.0 < factor < 0.5`` — partial straightening; at each waypoint the
-      algorithm looks ahead at most ``factor × (path_length − 1)`` steps.
-      Lower values keep the path closer to the original grid path while
-      still removing small-scale zigzag; higher values allow longer
-      straight segments.  Fine-grained values such as 0.05 are supported.
-    * ``0.5`` — maximum straightening; at each waypoint the algorithm
-      looks ahead up to half the path length.
-
-    Parameters
-    ----------
-    path : list[tuple[int, int]]
-        Grid-cell path from pathfinding (integer row, col).
-    cost_raster : numpy.ndarray
-        The cost raster used for pathfinding.  Cells with ``NaN``, ``Inf``,
-        or negative values are treated as barriers.
-    straighten_factor : float, optional
-        Controls the degree of path straightening (0.0 – 0.5, default 0.3).
-        See above for semantics.
-
-    Returns
-    -------
-    list[tuple[float, float]]
-        Straightened path as ``(row, col)`` float coordinates.
-        Contains only the essential waypoints where the direction must
-        change (typically at barrier edges).
+    After Chaikin corner-cutting, each segment of the smoothed path is
+    validated against the cost raster using the supercover line algorithm.
+    If any segment crosses a NODATA / barrier cell, the function returns
+    the original *path* as float coordinates so that the output never
+    passes through impassable areas.
     """
-    if len(path) <= 2:
-        return [(float(r), float(c)) for r, c in path]
+    smoothed = smooth_path(path, iterations)
 
-    # No straightening: return the original grid path as floats.
-    if straighten_factor <= 0.0:
-        return [(float(r), float(c)) for r, c in path]
+    if len(smoothed) <= 2:
+        return smoothed
 
     rows, cols = cost_raster.shape
     cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
+    _isfinite = math.isfinite
 
-    # Maximum lookahead distance (in path-index steps).
-    # Minimum of 2 so that at least one intermediate cell can be skipped
-    # (the loop searches from i+max_skip down to i+2; with max_skip < 2
-    # no skipping would occur and the result would equal the grid path).
-    n = len(path)
-    max_skip = max(2, int(straighten_factor * (n - 1)))
+    for i in range(len(smoothed) - 1):
+        r0 = int(round(smoothed[i][0]))
+        c0 = int(round(smoothed[i][1]))
+        r1 = int(round(smoothed[i + 1][0]))
+        c1 = int(round(smoothed[i + 1][1]))
+        r0 = max(0, min(rows - 1, r0))
+        c0 = max(0, min(cols - 1, c0))
+        r1 = max(0, min(rows - 1, r1))
+        c1 = max(0, min(cols - 1, c1))
+        for r, c in _supercover_line(r0, c0, r1, c1):
+            if not (0 <= r < rows and 0 <= c < cols):
+                return [(float(r), float(c)) for r, c in path]
+            val = float(cost_data[r, c])
+            if not _isfinite(val) or val < 0:
+                return [(float(r), float(c)) for r, c in path]
 
-    result_indices: List[int] = [0]
-    i = 0
-
-    while i < n - 1:
-        # Try the farthest reachable point (within max_skip) first.
-        j_limit = min(n - 1, i + max_skip)
-        best_j = i + 1
-        for j in range(j_limit, i + 1, -1):
-            if _is_line_clear(path[i], path[j], cost_data, rows, cols):
-                best_j = j
-                break
-        result_indices.append(best_j)
-        i = best_j
-
-    return [(float(path[k][0]), float(path[k][1])) for k in result_indices]
+    return smoothed
 
 
 # ---------------------------------------------------------------------------
