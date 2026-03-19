@@ -492,7 +492,7 @@ def _build_result(
 ) -> Dict:
     """Reconstruct path for the standard (non-directional) Dijkstra."""
     if progress_callback:
-        progress_callback("路径重建: 回溯最优路径...")
+        progress_callback("Path reconstruction: backtracking optimal path...")
     path: List[Tuple[int, int]] = []
     r, c = end
     while True:
@@ -519,7 +519,7 @@ def _build_result(
         turning_angles.append(turning_angle(directions[i - 1], directions[i]))
 
     if progress_callback:
-        progress_callback(f"路径拉直: 开始成本感知拉直 ({len(path)} 个节点)...")
+        progress_callback(f"Path straightening: starting cost-aware straightening ({len(path)} nodes)...")
 
     straightened = _cost_aware_straighten_path_numba(
         path, cost_raster, cell_size, straighten_factor, cost_tolerance
@@ -527,14 +527,14 @@ def _build_result(
 
     if progress_callback:
         progress_callback(
-            f"路径拉直: 完成 ({len(path)} → {len(straightened)} 个节点)"
+            f"Path straightening: complete ({len(path)} → {len(straightened)} nodes)"
         )
-        progress_callback("路径平滑: 开始 Chaikin 平滑...")
+        progress_callback("Path smoothing: starting Chaikin smoothing...")
 
     smoothed = _smooth_path_nodata_safe(straightened, cost_raster)
 
     if progress_callback:
-        progress_callback("路径平滑: 完成")
+        progress_callback("Path smoothing: complete")
 
     return {
         "path": path,
@@ -559,7 +559,7 @@ def _build_result_directed(
 ) -> Dict:
     """Reconstruct path for the direction-aware Dijkstra."""
     if progress_callback:
-        progress_callback("路径重建: 回溯最优路径...")
+        progress_callback("Path reconstruction: backtracking optimal path...")
 
     states: List[Tuple[int, int, int]] = []
     r, c, d = end_state
@@ -595,7 +595,7 @@ def _build_result_directed(
     total_cost = float(best[er, ec, ed_idx])
 
     if progress_callback:
-        progress_callback(f"路径拉直: 开始成本感知拉直 ({len(path)} 个节点)...")
+        progress_callback(f"Path straightening: starting cost-aware straightening ({len(path)} nodes)...")
 
     straightened = _cost_aware_straighten_path_numba(
         path, cost_raster, cell_size, straighten_factor, cost_tolerance
@@ -603,14 +603,14 @@ def _build_result_directed(
 
     if progress_callback:
         progress_callback(
-            f"路径拉直: 完成 ({len(path)} → {len(straightened)} 个节点)"
+            f"Path straightening: complete ({len(path)} → {len(straightened)} nodes)"
         )
-        progress_callback("路径平滑: 开始 Chaikin 平滑...")
+        progress_callback("Path smoothing: starting Chaikin smoothing...")
 
     smoothed = _smooth_path_nodata_safe(straightened, cost_raster)
 
     if progress_callback:
-        progress_callback("路径平滑: 完成")
+        progress_callback("Path smoothing: complete")
 
     return {
         "path": path,
@@ -710,7 +710,7 @@ def _dijkstra_standard(
     cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
 
     if progress_callback:
-        progress_callback("Dijkstra 搜索 (Numba JIT): 开始搜索...")
+        progress_callback("Dijkstra search (Numba JIT): starting search...")
 
     best, parent_dir = _dijkstra_core_standard(
         cost_data, rows, cols, sr, sc, er, ec,
@@ -719,7 +719,7 @@ def _dijkstra_standard(
     )
 
     if progress_callback:
-        progress_callback("Dijkstra 搜索 (Numba JIT): 完成")
+        progress_callback("Dijkstra search (Numba JIT): complete")
 
     if not np.isfinite(best[er, ec]):
         raise RuntimeError("No path found between start and end")
@@ -770,7 +770,7 @@ def _dijkstra_with_direction(
     curv_div = curv_weight / 180.0
 
     if progress_callback:
-        progress_callback("Dijkstra 搜索 (Numba JIT, 含方向): 开始搜索...")
+        progress_callback("Dijkstra search (Numba JIT, direction-aware): starting search...")
 
     best, parent_d, found, end_d = _dijkstra_core_directed(
         cost_data, rows, cols, sr, sc, er, ec,
@@ -780,7 +780,7 @@ def _dijkstra_with_direction(
     )
 
     if progress_callback:
-        progress_callback("Dijkstra 搜索 (Numba JIT, 含方向): 完成")
+        progress_callback("Dijkstra search (Numba JIT, direction-aware): complete")
 
     if not found:
         raise RuntimeError("No path found between start and end")
@@ -850,8 +850,8 @@ def cost_aware_least_cost_path(
     if progress_callback:
         rows, cols = cost_raster.shape
         progress_callback(
-            f"参数验证通过。栅格大小: {rows}×{cols}, "
-            f"起点: {start}, 终点: {end}"
+            f"Parameters validated. Raster size: {rows}×{cols}, "
+            f"start: {start}, end: {end}"
         )
 
     use_curvature = curvature_factor > 0.0 or max_turning_angle < 180.0

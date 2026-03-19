@@ -15,8 +15,8 @@ step-by-step progress in the ArcGIS Geoprocessing pane:
    each computational phase.
 
 Both tools accept the same parameters and produce the same output
-format.  The progress messages appear as text lines in the
-*Geoprocessing → Messages* section in ArcGIS Pro.
+format.  The progress is shown via the ArcGIS step progressor bar
+and as text lines in the *Geoprocessing → Messages* section.
 
 Usage
 -----
@@ -47,6 +47,58 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 import pure_python.cost_aware_straighten_lcp as _pure_python_mod  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Progress bar helper
+# ---------------------------------------------------------------------------
+
+# Map algorithm progress messages to percentage positions on the progress bar.
+_PROGRESS_MAP = [
+    ("Parameters validated", 5),
+    ("Dijkstra search", 10),          # start of search
+    ("Dijkstra search: complete", 75),
+    ("Path reconstruction", 78),
+    ("Path straightening: starting", 82),
+    ("Path straightening: complete", 88),
+    ("Path smoothing: starting", 92),
+    ("Path smoothing: complete", 96),
+]
+
+
+def _make_progress_callback(messages):
+    """Return a callable that updates both the ArcGIS progressor bar and messages.
+
+    Uses ``arcpy.SetProgressor("step", ...)`` for an actual progress bar,
+    and ``messages.addMessage()`` for text logging.
+    """
+    arcpy.SetProgressor("step", "Initializing...", 0, 100, 1)
+
+    def _callback(msg):
+        messages.addMessage(msg)
+        arcpy.SetProgressorLabel(msg)
+
+        # For Dijkstra per-iteration messages like "expanded X nodes (~Y%)",
+        # map the embedded percentage to the overall 10-75% range.
+        if "expanded" in msg and "(~" in msg:
+            try:
+                pct_str = msg.split("(~")[1].split("%")[0]
+                dijkstra_pct = int(pct_str)
+                arcpy.SetProgressorPosition(10 + int(dijkstra_pct * 0.65))
+            except (IndexError, ValueError):
+                pass
+            return
+
+        # Determine percentage from the message content
+        best_pct = None
+        for pattern, pct in _PROGRESS_MAP:
+            if pattern in msg:
+                best_pct = pct
+
+        if best_pct is not None:
+            arcpy.SetProgressorPosition(best_pct)
+
+    return _callback
 
 
 class Toolbox:
@@ -297,11 +349,12 @@ class CostAwareLCPTool:
         importlib.reload(_pure_python_mod)
 
         inputs = _read_inputs(parameters)
+        progress_cb = _make_progress_callback(messages)
 
         messages.addMessage(
-            f"[Cost-Aware / Pure Python] 开始计算...\n"
-            f"  起点: {inputs['start_rc']}, 终点: {inputs['end_rc']}\n"
-            f"  栅格大小: {inputs['cost_array'].shape}"
+            f"[Cost-Aware / Pure Python] Starting computation...\n"
+            f"  Start: {inputs['start_rc']}, End: {inputs['end_rc']}\n"
+            f"  Raster size: {inputs['cost_array'].shape}"
         )
 
         t0 = time.time()
@@ -316,18 +369,18 @@ class CostAwareLCPTool:
             straighten_factor=inputs["straighten_factor"],
             cost_tolerance=inputs["cost_tolerance"],
             cell_size=inputs["cell_size"],
-            progress_callback=messages.addMessage,
+            progress_callback=progress_cb,
         )
 
         elapsed = time.time() - t0
 
         messages.addMessage(
-            f"[Cost-Aware / Pure Python] 计算完成 (耗时 {elapsed:.1f}s)\n"
-            f"  路径节点: {len(result['path'])} 个\n"
-            f"  拉直后节点: {len(result['straightened_path'])} 个\n"
-            f"  平滑后节点: {len(result['smoothed_path'])} 个\n"
-            f"  总成本: {result['total_cost']:.2f}\n"
-            f"  路径长度: {result['path_length']:.2f}"
+            f"[Cost-Aware / Pure Python] Computation complete ({elapsed:.1f}s)\n"
+            f"  Path nodes: {len(result['path'])}\n"
+            f"  Straightened nodes: {len(result['straightened_path'])}\n"
+            f"  Smoothed nodes: {len(result['smoothed_path'])}\n"
+            f"  Total cost: {result['total_cost']:.2f}\n"
+            f"  Path length: {result['path_length']:.2f}"
         )
 
         _write_polyline(
@@ -338,7 +391,9 @@ class CostAwareLCPTool:
             inputs["sr"],
             inputs["output_fc"],
         )
-        messages.addMessage(f"输出已写入: {inputs['output_fc']}")
+        arcpy.SetProgressorPosition(100)
+        arcpy.ResetProgressor()
+        messages.addMessage(f"Output written to: {inputs['output_fc']}")
 
     def postExecute(self, parameters):  # noqa: N802
         return
@@ -381,17 +436,18 @@ class CostAwareNumbaLCPTool:
             importlib.reload(_numba_mod)
         except ImportError:
             messages.addErrorMessage(
-                "无法导入 numba_accelerated 模块。请确保 numba 已安装: "
-                "pip install numba"
+                "Cannot import numba_accelerated module. "
+                "Please ensure numba is installed: pip install numba"
             )
             raise
 
         inputs = _read_inputs(parameters)
+        progress_cb = _make_progress_callback(messages)
 
         messages.addMessage(
-            f"[Cost-Aware / Numba] 开始计算...\n"
-            f"  起点: {inputs['start_rc']}, 终点: {inputs['end_rc']}\n"
-            f"  栅格大小: {inputs['cost_array'].shape}"
+            f"[Cost-Aware / Numba] Starting computation...\n"
+            f"  Start: {inputs['start_rc']}, End: {inputs['end_rc']}\n"
+            f"  Raster size: {inputs['cost_array'].shape}"
         )
 
         t0 = time.time()
@@ -406,18 +462,18 @@ class CostAwareNumbaLCPTool:
             straighten_factor=inputs["straighten_factor"],
             cost_tolerance=inputs["cost_tolerance"],
             cell_size=inputs["cell_size"],
-            progress_callback=messages.addMessage,
+            progress_callback=progress_cb,
         )
 
         elapsed = time.time() - t0
 
         messages.addMessage(
-            f"[Cost-Aware / Numba] 计算完成 (耗时 {elapsed:.1f}s)\n"
-            f"  路径节点: {len(result['path'])} 个\n"
-            f"  拉直后节点: {len(result['straightened_path'])} 个\n"
-            f"  平滑后节点: {len(result['smoothed_path'])} 个\n"
-            f"  总成本: {result['total_cost']:.2f}\n"
-            f"  路径长度: {result['path_length']:.2f}"
+            f"[Cost-Aware / Numba] Computation complete ({elapsed:.1f}s)\n"
+            f"  Path nodes: {len(result['path'])}\n"
+            f"  Straightened nodes: {len(result['straightened_path'])}\n"
+            f"  Smoothed nodes: {len(result['smoothed_path'])}\n"
+            f"  Total cost: {result['total_cost']:.2f}\n"
+            f"  Path length: {result['path_length']:.2f}"
         )
 
         _write_polyline(
@@ -428,7 +484,9 @@ class CostAwareNumbaLCPTool:
             inputs["sr"],
             inputs["output_fc"],
         )
-        messages.addMessage(f"输出已写入: {inputs['output_fc']}")
+        arcpy.SetProgressorPosition(100)
+        arcpy.ResetProgressor()
+        messages.addMessage(f"Output written to: {inputs['output_fc']}")
 
     def postExecute(self, parameters):  # noqa: N802
         return

@@ -46,10 +46,10 @@ class TestPurePythonProgressCallback:
         assert len(collector.messages) > 0
         # Check for key phases
         msgs = "\n".join(collector.messages)
-        assert "参数验证通过" in msgs
+        assert "Parameters validated" in msgs
         assert "Dijkstra" in msgs
-        assert "路径重建" in msgs
-        assert "路径平滑" in msgs
+        assert "Path reconstruction" in msgs
+        assert "Path smoothing" in msgs
 
     def test_callback_receives_messages_curvature(self):
         """Direction-aware Dijkstra should fire progress messages."""
@@ -62,8 +62,8 @@ class TestPurePythonProgressCallback:
         )
         assert len(collector.messages) > 0
         msgs = "\n".join(collector.messages)
-        assert "含方向" in msgs
-        assert "路径拉直" in msgs
+        assert "direction-aware" in msgs
+        assert "Path straightening" in msgs
 
     def test_callback_shows_straightening_reduction(self):
         """Progress should report node count reduction during straightening."""
@@ -74,7 +74,7 @@ class TestPurePythonProgressCallback:
             straighten_factor=0.5,
             progress_callback=collector,
         )
-        straighten_msgs = [m for m in collector.messages if "路径拉直: 完成" in m]
+        straighten_msgs = [m for m in collector.messages if "Path straightening: complete" in m]
         assert len(straighten_msgs) >= 1
         assert "→" in straighten_msgs[0]
 
@@ -108,10 +108,10 @@ class TestNumbaProgressCallback:
         numba_lcp(raster, (0, 0), (19, 19), progress_callback=collector)
         assert len(collector.messages) > 0
         msgs = "\n".join(collector.messages)
-        assert "参数验证通过" in msgs
+        assert "Parameters validated" in msgs
         assert "Numba JIT" in msgs
-        assert "路径重建" in msgs
-        assert "路径平滑" in msgs
+        assert "Path reconstruction" in msgs
+        assert "Path smoothing" in msgs
 
     def test_callback_receives_messages_curvature(self):
         raster = np.ones((20, 20))
@@ -123,7 +123,7 @@ class TestNumbaProgressCallback:
         )
         assert len(collector.messages) > 0
         msgs = "\n".join(collector.messages)
-        assert "含方向" in msgs
+        assert "direction-aware" in msgs
 
     def test_result_identical_with_or_without_callback(self):
         np.random.seed(42)
@@ -142,6 +142,6 @@ class TestNumbaProgressCallback:
             straighten_factor=0.5,
             progress_callback=collector,
         )
-        straighten_msgs = [m for m in collector.messages if "路径拉直: 完成" in m]
+        straighten_msgs = [m for m in collector.messages if "Path straightening: complete" in m]
         assert len(straighten_msgs) >= 1
         assert "→" in straighten_msgs[0]
