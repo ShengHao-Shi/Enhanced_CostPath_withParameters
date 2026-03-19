@@ -488,8 +488,11 @@ def _build_result(
     cost_raster: np.ndarray,
     straighten_factor: float,
     cost_tolerance: float,
+    progress_callback=None,
 ) -> Dict:
     """Reconstruct path for the standard (non-directional) Dijkstra."""
+    if progress_callback:
+        progress_callback("路径重建: 回溯最优路径...")
     path: List[Tuple[int, int]] = []
     r, c = end
     while True:
@@ -515,14 +518,28 @@ def _build_result(
     for i in range(1, len(directions)):
         turning_angles.append(turning_angle(directions[i - 1], directions[i]))
 
+    if progress_callback:
+        progress_callback(f"路径拉直: 开始成本感知拉直 ({len(path)} 个节点)...")
+
     straightened = _cost_aware_straighten_path_numba(
         path, cost_raster, cell_size, straighten_factor, cost_tolerance
     )
 
+    if progress_callback:
+        progress_callback(
+            f"路径拉直: 完成 ({len(path)} → {len(straightened)} 个节点)"
+        )
+        progress_callback("路径平滑: 开始 Chaikin 平滑...")
+
+    smoothed = _smooth_path_nodata_safe(straightened, cost_raster)
+
+    if progress_callback:
+        progress_callback("路径平滑: 完成")
+
     return {
         "path": path,
         "straightened_path": straightened,
-        "smoothed_path": _smooth_path_nodata_safe(straightened, cost_raster),
+        "smoothed_path": smoothed,
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -538,8 +555,12 @@ def _build_result_directed(
     cost_raster: np.ndarray,
     straighten_factor: float,
     cost_tolerance: float,
+    progress_callback=None,
 ) -> Dict:
     """Reconstruct path for the direction-aware Dijkstra."""
+    if progress_callback:
+        progress_callback("路径重建: 回溯最优路径...")
+
     states: List[Tuple[int, int, int]] = []
     r, c, d = end_state
     d_idx = d if d >= 0 else NUM_DIRS
@@ -573,14 +594,28 @@ def _build_result_directed(
     ed_idx = ed if ed >= 0 else NUM_DIRS
     total_cost = float(best[er, ec, ed_idx])
 
+    if progress_callback:
+        progress_callback(f"路径拉直: 开始成本感知拉直 ({len(path)} 个节点)...")
+
     straightened = _cost_aware_straighten_path_numba(
         path, cost_raster, cell_size, straighten_factor, cost_tolerance
     )
 
+    if progress_callback:
+        progress_callback(
+            f"路径拉直: 完成 ({len(path)} → {len(straightened)} 个节点)"
+        )
+        progress_callback("路径平滑: 开始 Chaikin 平滑...")
+
+    smoothed = _smooth_path_nodata_safe(straightened, cost_raster)
+
+    if progress_callback:
+        progress_callback("路径平滑: 完成")
+
     return {
         "path": path,
         "straightened_path": straightened,
-        "smoothed_path": _smooth_path_nodata_safe(straightened, cost_raster),
+        "smoothed_path": smoothed,
         "total_cost": total_cost,
         "path_length": path_length,
         "directions": directions,
@@ -651,6 +686,7 @@ def _dijkstra_standard(
     cell_size: Tuple[float, float],
     straighten_factor: float,
     cost_tolerance: float,
+    progress_callback=None,
 ) -> Dict:
     rows, cols = cost_raster.shape
     sr, sc = start
@@ -673,18 +709,24 @@ def _dijkstra_standard(
 
     cost_data = np.ascontiguousarray(cost_raster, dtype=np.float64)
 
+    if progress_callback:
+        progress_callback("Dijkstra 搜索 (Numba JIT): 开始搜索...")
+
     best, parent_dir = _dijkstra_core_standard(
         cost_data, rows, cols, sr, sc, er, ec,
         step_dists, h_map, dist_weight, straight_weight, scale,
         _DIRS_ARRAY,
     )
 
+    if progress_callback:
+        progress_callback("Dijkstra 搜索 (Numba JIT): 完成")
+
     if not np.isfinite(best[er, ec]):
         raise RuntimeError("No path found between start and end")
 
     return _build_result(parent_dir, start, end, best, float(best[er, ec]),
                          cell_size, cost_data, straighten_factor,
-                         cost_tolerance)
+                         cost_tolerance, progress_callback)
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +743,7 @@ def _dijkstra_with_direction(
     cell_size: Tuple[float, float],
     straighten_factor: float,
     cost_tolerance: float,
+    progress_callback=None,
 ) -> Dict:
     rows, cols = cost_raster.shape
     sr, sc = start
@@ -726,6 +769,9 @@ def _dijkstra_with_direction(
 
     curv_div = curv_weight / 180.0
 
+    if progress_callback:
+        progress_callback("Dijkstra 搜索 (Numba JIT, 含方向): 开始搜索...")
+
     best, parent_d, found, end_d = _dijkstra_core_directed(
         cost_data, rows, cols, sr, sc, er, ec,
         step_dists, h_map, curv_div, max_turning_angle,
@@ -733,13 +779,16 @@ def _dijkstra_with_direction(
         _DIRS_ARRAY, _TURN_LUT_ARRAY,
     )
 
+    if progress_callback:
+        progress_callback("Dijkstra 搜索 (Numba JIT, 含方向): 完成")
+
     if not found:
         raise RuntimeError("No path found between start and end")
 
     end_state = (er, ec, end_d)
     return _build_result_directed(parent_d, end_state, best, cell_size,
                                    cost_data, straighten_factor,
-                                   cost_tolerance)
+                                   cost_tolerance, progress_callback)
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +805,7 @@ def cost_aware_least_cost_path(
     straighten_factor: float = 0.3,
     cost_tolerance: float = 1.05,
     cell_size: Tuple[float, float] = (1.0, 1.0),
+    progress_callback=None,
 ) -> Dict:
     """Compute an LCP with cost-aware post-processing straightening.
 
@@ -782,6 +832,11 @@ def cost_aware_least_cost_path(
         Maximum shortcut-cost / original-cost ratio (>= 1.0, default 1.05).
     cell_size : tuple[float, float], optional
         ``(y_size, x_size)`` of each raster cell.
+    progress_callback : callable, optional
+        A function that accepts a single string argument for progress
+        messages.  When running inside ArcGIS, pass
+        ``messages.addMessage`` to see step-by-step progress in the
+        Geoprocessing pane.
 
     Returns
     -------
@@ -792,15 +847,22 @@ def cost_aware_least_cost_path(
                      max_turning_angle, distance_factor, straighten_factor,
                      cost_tolerance)
 
+    if progress_callback:
+        rows, cols = cost_raster.shape
+        progress_callback(
+            f"参数验证通过。栅格大小: {rows}×{cols}, "
+            f"起点: {start}, 终点: {end}"
+        )
+
     use_curvature = curvature_factor > 0.0 or max_turning_angle < 180.0
 
     if use_curvature:
         return _dijkstra_with_direction(
             cost_raster, start, end,
             curvature_factor, max_turning_angle, distance_factor, cell_size,
-            straighten_factor, cost_tolerance,
+            straighten_factor, cost_tolerance, progress_callback,
         )
     return _dijkstra_standard(
         cost_raster, start, end, distance_factor, cell_size,
-        straighten_factor, cost_tolerance,
+        straighten_factor, cost_tolerance, progress_callback,
     )

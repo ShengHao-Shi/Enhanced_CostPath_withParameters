@@ -654,6 +654,7 @@ class CostAwareStraightenedLCPTool:
             straighten_factor=straighten_factor,
             cost_tolerance=cost_tolerance,
             cell_size=(cell_y, cell_x),
+            progress_callback=messages.addMessage,
         )
 
         messages.addMessage(
