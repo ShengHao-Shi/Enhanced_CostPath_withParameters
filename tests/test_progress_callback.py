@@ -88,6 +88,28 @@ class TestPurePythonProgressCallback:
         assert r1["path"] == r2["path"]
         assert abs(r1["total_cost"] - r2["total_cost"]) < 1e-6
 
+    def test_high_precision_raster_no_excess_expansion(self):
+        """High-precision float rasters must not cause >100% node expansion.
+
+        Regression test: when the ``best`` array used float32 but costs
+        were computed in float64, truncation collisions caused duplicate
+        cell expansions, making progress exceed 100%.
+        """
+        np.random.seed(123)
+        # Create raster with high-precision values like those from
+        # ArcGIS Pro raster calculator (7 decimal places)
+        raster = np.random.uniform(0.013889, 72.0, (50, 50)).astype(np.float32)
+        collector = _ProgressCollector()
+        result = python_lcp(raster, (0, 0), (49, 49), progress_callback=collector)
+        assert len(result["path"]) >= 2
+
+        # Verify no progress message exceeds 99%
+        for msg in collector.messages:
+            if "(~" in msg and "%)" in msg:
+                pct_str = msg.split("(~")[1].split("%")[0]
+                pct = int(pct_str)
+                assert pct <= 99, f"Progress exceeded 99%: {msg}"
+
 
 class TestNumbaProgressCallback:
     """Test that numba_accelerated version fires progress callbacks."""
@@ -145,3 +167,11 @@ class TestNumbaProgressCallback:
         straighten_msgs = [m for m in collector.messages if "Path straightening: complete" in m]
         assert len(straighten_msgs) >= 1
         assert "→" in straighten_msgs[0]
+
+    def test_high_precision_raster_no_excess_expansion(self):
+        """High-precision float rasters must not cause >100% node expansion."""
+        np.random.seed(123)
+        raster = np.random.uniform(0.013889, 72.0, (50, 50)).astype(np.float32)
+        collector = _ProgressCollector()
+        result = numba_lcp(raster, (0, 0), (49, 49), progress_callback=collector)
+        assert len(result["path"]) >= 2

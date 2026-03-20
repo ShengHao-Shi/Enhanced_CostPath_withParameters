@@ -237,7 +237,7 @@ def _dijkstra_standard(
     if progress_callback:
         progress_callback("Dijkstra search: initialization complete, starting search...")
 
-    best = np.full((rows, cols), np.inf, dtype=np.float32)
+    best = np.full((rows, cols), np.inf, dtype=np.float64)
     best[sr, sc] = 0.0
     parent_dir = np.full((rows, cols), -1, dtype=np.int8)
 
@@ -261,7 +261,7 @@ def _dijkstra_standard(
 
         cells_expanded += 1
         if progress_callback:
-            pct = int(cells_expanded * 100 / total_cells)
+            pct = min(int(cells_expanded * 100 / total_cells), 99)
             if pct >= next_pct:
                 progress_callback(f"Dijkstra search: expanded {cells_expanded} nodes (~{pct}%)")
                 next_pct = pct + 10
@@ -347,7 +347,7 @@ def _dijkstra_with_direction(
         progress_callback("Dijkstra search (direction-aware): initialization complete, starting search...")
 
     n_states = NUM_DIRS + 1
-    best = np.full((rows, cols, n_states), np.inf, dtype=np.float32)
+    best = np.full((rows, cols, n_states), np.inf, dtype=np.float64)
     best[sr, sc, NUM_DIRS] = 0.0
 
     parent_d = np.full((rows, cols, n_states), -1, dtype=np.int8)
@@ -382,7 +382,7 @@ def _dijkstra_with_direction(
 
         cells_expanded += 1
         if progress_callback:
-            pct = int(cells_expanded * 100 / total_cells)
+            pct = min(int(cells_expanded * 100 / total_cells), 99)
             if pct >= next_pct:
                 progress_callback(
                     f"Dijkstra search (direction-aware): expanded {cells_expanded} nodes (~{pct}%)"

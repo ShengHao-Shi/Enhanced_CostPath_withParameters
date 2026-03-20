@@ -278,7 +278,7 @@ def _dijkstra_core_standard(
 
     Uses an array-based min-heap instead of Python heapq.
     """
-    best = np.full((rows, cols), np.inf, dtype=np.float32)
+    best = np.full((rows, cols), np.inf, dtype=np.float64)
     best[sr, sc] = 0.0
     parent_dir = np.full((rows, cols), -1, dtype=np.int8)
 
@@ -341,10 +341,10 @@ def _dijkstra_core_standard(
                         new_cost += similarity * straight_weight * sd
 
             if new_cost < best[nr, nc]:
-                best[nr, nc] = np.float32(new_cost)
+                best[nr, nc] = new_cost
                 parent_dir[nr, nc] = np.int8(d)
                 counter += 1.0
-                g_stored = float(best[nr, nc])
+                g_stored = best[nr, nc]
                 elem[0] = g_stored + h_map[nr, nc]
                 elem[1] = counter
                 elem[2] = g_stored
@@ -377,7 +377,7 @@ def _dijkstra_core_directed(
     State space: (row, col, direction), with direction in [0..8] (8 = no-dir).
     """
     n_states = 9  # 8 directions + 1 for "no direction"
-    best = np.full((rows, cols, n_states), np.inf, dtype=np.float32)
+    best = np.full((rows, cols, n_states), np.inf, dtype=np.float64)
     best[sr, sc, 8] = 0.0
     parent_d = np.full((rows, cols, n_states), -1, dtype=np.int8)
 
@@ -455,10 +455,10 @@ def _dijkstra_core_directed(
             new_cost = g + base + curv_penalty + straightness_penalty + dist_weight * sd
             nd_idx = d_out
             if new_cost < best[nr, nc, nd_idx]:
-                best[nr, nc, nd_idx] = np.float32(new_cost)
+                best[nr, nc, nd_idx] = new_cost
                 parent_d[nr, nc, nd_idx] = np.int8(d_in)
                 counter += 1.0
-                g_stored = float(best[nr, nc, nd_idx])
+                g_stored = best[nr, nc, nd_idx]
                 elem[0] = g_stored + float(h_map[nr, nc])
                 elem[1] = counter
                 elem[2] = g_stored
