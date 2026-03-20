@@ -91,9 +91,9 @@ class TestPurePythonProgressCallback:
     def test_high_precision_raster_no_excess_expansion(self):
         """High-precision float rasters must not cause >100% node expansion.
 
-        Regression test: when the ``best`` array used float32 but costs
-        were computed in float64, truncation collisions caused duplicate
-        cell expansions, making progress exceed 100%.
+        Regression test: the ``best`` array now uses float64 to match the
+        float64 cost computations.  Previously float32 truncation caused
+        duplicate cell expansions, making progress exceed 100%.
         """
         np.random.seed(123)
         # Create raster with high-precision values like those from
