@@ -34,3 +34,6 @@ htmlcov/
 *.img
 *.adf
 *.gdb/
+
+# Release zip packages (built by release/build_release.sh, not committed)
+release/*.zip

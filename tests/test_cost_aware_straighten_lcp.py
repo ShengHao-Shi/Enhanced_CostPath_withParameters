@@ -1,11 +1,11 @@
-"""Tests for the cost_aware_straighten_lcp module (方案C)."""
+"""Tests for the cost_aware_straighten_lcp module (Approach C)."""
 
 import math
 
 import numpy as np
 import pytest
 
-from cost_aware_straighten_lcp import (
+from pure_python.cost_aware_straighten_lcp import (
     _supercover_line,
     _is_line_clear,
     _line_cost,

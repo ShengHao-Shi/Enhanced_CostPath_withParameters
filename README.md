@@ -1,186 +1,384 @@
-# CostPath_withParameters
+# Enhanced Cost Path with Parameters
+
+> **中文文档** → [README_CN.md](README_CN.md)
 
 A GIS tool that extends the standard Least Cost Path (LCP) algorithm with
-**curvature control** and a **distance factor**, addressing limitations of
-ESRI's built-in LCP tool.
+**curvature control**, a **distance factor**, **cost-aware path
+straightening**, and **Chaikin smoothing** — addressing fundamental
+limitations of ESRI's built-in LCP tool.
+
+Runs as a **standalone Python library** (no ArcGIS licence required) and
+also ships as an **ArcGIS Pro Python Toolbox** (`.pyt`) for users who prefer
+the geoprocessing UI.
 
 ---
 
-## Motivation
+## Table of Contents
 
-The ArcGIS *Least Cost Path* tool only exposes three inputs — a cost raster,
-a start point, and an end point — plus a boolean option for handling zero
-values.  In practice two additional controls are needed:
-
-| Need | Why |
-|---|---|
-| **Curvature / turn control** | Standard LCP often produces paths with abrupt, sharp turns that are unrealistic for roads, pipelines, or similar linear features. |
-| **Distance weighting** | Standard LCP considers only the cost surface; it may route a path through a long detour of low-cost cells when a slightly more expensive but much shorter route would be preferable. |
-| **Anti-zigzag** | On rasters with low cost variation the grid-based path often zigzags between cells; the algorithm should prefer straight-line continuation. |
-| **Smooth curves** | Even with turn constraints, grid-aligned paths have angular corners; a post-processing step rounds them into smooth arcs. |
-
-## Approach — ArcGIS vs. Standalone
-
-| Option | Verdict |
-|---|---|
-| **ArcGIS / ArcPy** | ArcPy can read rasters and feature classes, but ESRI's own cost-distance / cost-path functions do **not** expose curvature or distance parameters.  A custom algorithm must be written in Python regardless. |
-| **Standalone (GDAL / rasterio + NumPy)** | More portable, no licence dependency, easier to test and deploy.  Recommended as the primary implementation. |
-| **Best of both** | Implement the core algorithm with NumPy only, then provide a thin ArcGIS Python Toolbox (`.pyt`) wrapper for users who prefer the ArcGIS Pro UI. |
-
-This repository follows the *best-of-both* strategy.
+1. [Why This Tool?](#1-why-this-tool)
+2. [Geometric Principles](#2-geometric-principles)
+3. [Visual Results](#3-visual-results)
+4. [Parameters](#4-parameters)
+5. [Quick Start](#5-quick-start)
+6. [Download](#6-download)
+7. [Repository Layout](#7-repository-layout)
+8. [Running Tests](#8-running-tests)
+9. [Licence](#9-licence)
 
 ---
 
-## Repository Layout
+## 1. Why This Tool?
+
+ArcGIS's built-in *Least Cost Path* tool exposes only three inputs — a cost
+raster, a source point, and a destination point.  In practice, several
+additional controls are almost always needed:
+
+| Limitation of native LCP | Consequence |
+|---|---|
+| **No curvature control** | Produces paths with abrupt, sharp turns that are unrealistic for roads, pipelines, or similar linear infrastructure. |
+| **No distance weighting** | May route through a long, winding detour of low-cost cells when a slightly more expensive but far shorter path would be preferable. |
+| **Grid-aligned zigzag artifacts** | 8-direction raster paths produce staircase-like segments that look unnatural, even when the overall routing is correct. |
+| **No smooth curves** | Even with turn constraints, grid-aligned paths have angular corners; infrastructure design requires smooth arcs. |
+
+This tool adds four complementary mechanisms — a **curvature penalty**, a
+**distance penalty**, **cost-aware post-processing straightening**, and
+**Chaikin smoothing** — while keeping full compatibility with any cost
+raster.
+
+---
+
+## 2. Geometric Principles
+
+### 2.1 8-Direction Grid Search
+
+The algorithm performs a **modified Dijkstra search on an 8-connected
+raster grid**.  From each cell, movement is allowed to all eight
+neighbouring cells (cardinal and diagonal directions).
 
 ```
-CostPath_withParameters/
-├── enhanced_lcp.py        # Core algorithm (NumPy only, no ArcGIS dependency)
-├── arcgis_toolbox.pyt     # ArcGIS Python Toolbox wrapper (requires arcpy)
-├── requirements.txt       # Python dependencies for standalone use
-├── tests/
-│   └── test_enhanced_lcp.py
-└── README.md
+NW  N  NE        (row-1,col-1) (row-1,col) (row-1,col+1)
+ W  ·  E    →    (row,  col-1)     ·       (row,  col+1)
+SW  S  SE        (row+1,col-1) (row+1,col) (row+1,col+1)
 ```
 
-## Algorithm
+The Euclidean step distance is:
 
-The tool uses a **modified Dijkstra's algorithm** on a raster grid with
-8-connectivity.  When curvature control is active the search state is
-extended to include the incoming travel direction, enabling the algorithm to
-compute turning angles.
+- **Cardinal step** (N, S, E, W): `d = cell_size`
+- **Diagonal step** (NE, NW, SE, SW): `d = √2 × cell_size`
 
-### Cost Function
+This ensures that the path length metric is geometrically accurate.
 
-For each step from cell *A* to neighbour *B*, arriving at *A* from direction
-*d_in* and leaving toward direction *d_out*:
+When curvature control is active, the search **state** is extended from
+`(row, col)` to `(row, col, incoming_direction)`.  This makes it possible
+to compute the turning angle at every step and add it as a cost component,
+at the expense of a larger state space (×8 more states).
+
+### 2.2 Extended Cost Function
+
+For each step from cell *A* → cell *B*, arriving from direction *d_in* and
+leaving in direction *d_out*, the per-step cost is:
 
 ```
-step_cost = base_cost + curvature_penalty + straightness_penalty + distance_penalty
+step_cost = base_cost
+          + curvature_penalty
+          + straightness_penalty
+          + distance_penalty
 ```
 
 | Component | Formula | When active |
 |---|---|---|
 | **base_cost** | `cost_raster[B] × step_distance` | Always |
-| **curvature_penalty** | `curvature_factor × amplifier × (angle / 180) × step_distance × cost_scale` | `curvature_factor > 0` |
-| **straightness_penalty** | `similarity × 0.3 × cost_scale × step_distance` | Direction change in direction-aware mode |
-| **distance_penalty** | `distance_factor × step_distance × cost_scale` | `distance_factor > 0` |
+| **curvature_penalty** | `curvature_factor × 5 × cost_scale × (θ / 180°) × step_distance` | `curvature_factor > 0` |
+| **straightness_penalty** | `similarity × 0.3 × cost_scale × step_distance` | Direction changes in curvature-aware mode |
+| **distance_penalty** | `distance_factor × cost_scale × step_distance` | `distance_factor > 0` |
 
-* `step_distance` — Euclidean distance between cell centres (1 for cardinal,
-  √2 for diagonal, scaled by `cell_size`).
-* `cost_scale` — mean of all finite cost-raster values; used to keep penalty
-  terms in the same order of magnitude as the base cost.
-* `similarity` — how close the target-cell cost is to the straight-ahead
-  cell cost (1.0 when equal, 0.0 when very different).  This makes the
-  anti-zigzag penalty adaptive: direction changes are discouraged more
-  strongly when cost variation is low.
-* `amplifier` — internal constant (5.0) that makes `curvature_factor` values
-  between 0 and 1 produce a visible effect.
+**Key terms:**
 
-### Hard Turn Constraint
+- `θ` — turning angle in degrees between *d_in* and *d_out*  
+  (0° = straight ahead, 45° = one diagonal, 90° = right-angle turn, 180° = U-turn).
+- `cost_scale` — mean of all finite, non-negative raster values; keeps
+  penalty terms in the same order of magnitude as the base cost.
+- `similarity` — `max(0, 1 − |cost_B − cost_straight| / cost_scale)`.
+  High when the target cell costs roughly the same as the straight-ahead
+  cell; suppresses the anti-zigzag penalty in heterogeneous areas.
 
-If `max_turning_angle` is set below 180°, any transition whose turning angle
-exceeds that threshold is disallowed (pruned from the search).
+**Hard turn constraint:** when `max_turning_angle < 180°`, any transition
+whose turning angle exceeds the threshold is completely pruned from the
+search (not just penalised).
 
-### Performance Optimisation
+### 2.3 Cost-Aware Path Straightening
 
-When `curvature_factor == 0` **and** `max_turning_angle == 180`, the
-algorithm automatically falls back to a standard (direction-free) Dijkstra
-search with a smaller state space.
+The raw Dijkstra path follows the raster grid and therefore contains
+staircase-like zigzags.  A post-processing step reduces unnecessary
+waypoints by trying to replace each multi-cell sub-segment with a direct
+straight-line shortcut.
 
-### Path Smoothing
+The algorithm uses the **supercover line** (grid-traversal rasterisation)
+to enumerate every raster cell that a straight line passes through.
+For each candidate shortcut *A → E*:
 
-After the grid-cell path is computed, **Chaikin's corner-cutting algorithm**
-is applied to produce a `smoothed_path` where angular corners are replaced
-by rounded arcs.  The smoothed coordinates are fractional (row, col) values
-and are always included in the result dictionary.
+1. **Barrier check** — if any cell on the straight line is NODATA or outside
+   the raster, the shortcut is rejected.
+2. **Cost check** — the accumulated cost along the straight line
+   (average cell cost × Euclidean distance) is compared to the original
+   grid-path cost for the same segment:
+
+```
+Accept shortcut A → E  ⟺  cost(shortcut) ≤ cost(A→…→E) × cost_tolerance
+```
+
+This prevents the straightened path from cutting through high-cost regions
+that the Dijkstra search correctly avoided.  The `cost_tolerance` parameter
+(default 1.05 = 5% overhead allowed) gives explicit control over the
+trade-off between visual straightness and cost fidelity.
+
+### 2.4 Chaikin Smoothing
+
+After straightening, **Chaikin's corner-cutting algorithm** replaces each
+angular corner with a smooth arc through iterative subdivision.  Given
+waypoints `[P₀, P₁, P₂, …]`, each iteration inserts two new points near
+each interior vertex:
+
+```
+Q = 0.75 × Pᵢ + 0.25 × Pᵢ₊₁
+R = 0.25 × Pᵢ + 0.75 × Pᵢ₊₁
+```
+
+After 3 iterations the result converges to a B-spline approximation of the
+original polyline with rounded corners.  A final NODATA safety check falls
+back to the un-smoothed path if any smoothed segment would cross a barrier.
 
 ---
 
-## Parameters
+## 3. Visual Results
+
+### Algorithm Pipeline
+
+The three post-Dijkstra processing stages transform the raw grid path into
+a smooth, clean result:
+
+![Algorithm pipeline: grid path → straightened → smoothed](docs/images/pipeline_steps.png)
+
+| Stage | Typical waypoint count | Visual quality |
+|---|---|---|
+| Raw 8-dir grid path | ~100–200 per 100 cells | Staircase zigzags |
+| Cost-aware straightened | 70–90% fewer | Clean straight segments |
+| Chaikin smoothed | (density added) | Smooth arcs at corners |
+
+---
+
+### Effect of Parameters
+
+Each parameter independently controls a different aspect of the path shape:
+
+![Effect of curvature_factor, distance_factor, and combined parameters](docs/images/comparison_parameters.png)
+
+| Panel | Parameters | Observable effect |
+|---|---|---|
+| Standard LCP | All defaults (0) | Zigzag grid path; may take long detours |
+| + curvature | `curvature_factor=0.7` | Gentler turns; path avoids sharp corners |
+| + distance | `distance_factor=0.4` | Path pulled toward shorter routes |
+| All combined | curvature + distance + straighten | Smooth, direct, realistic path |
+
+---
+
+### Cost Tolerance Effect
+
+`cost_tolerance` controls how aggressively the straightening step takes
+shortcuts around the grid path:
+
+![Effect of cost_tolerance from 1.0 to 2.0](docs/images/cost_tolerance_effect.png)
+
+- **1.0** — only accept shortcuts as cheap or cheaper than the original.
+- **1.05** *(default)* — allows 5% cost overhead; good balance.
+- **1.2** — more aggressive straightening; may take slightly costly shortcuts.
+- **2.0** — essentially NODATA-only check; maximum visual straightness.
+
+---
+
+## 4. Parameters
+
+### Full parameter reference
 
 | Parameter | Type | Range | Default | Description |
 |---|---|---|---|---|
-| `cost_raster` | 2-D NumPy array | — | *(required)* | Traversal cost surface.  `NaN` / `Inf` cells are barriers. |
-| `start` | `(row, col)` | — | *(required)* | Start cell. |
-| `end` | `(row, col)` | — | *(required)* | End cell. |
-| `curvature_factor` | float | 0.0 – 1.0 | 0.0 | Soft penalty weight for sharp turns.  0 = standard LCP. |
-| `max_turning_angle` | float | 0 – 180 | 180.0 | Hard upper limit on turning angle (degrees).  180 = unrestricted; lower = gentler turns. |
-| `distance_factor` | float | 0.0 – 1.0 | 0.0 | Weight for raw path length.  Higher ⇒ shorter paths preferred. |
+| `cost_raster` | 2-D NumPy array | — | *(required)* | Traversal cost surface. `NaN`/`Inf`/negative cells are impassable barriers. |
+| `start` | `(row, col)` | — | *(required)* | Start cell (zero-based row/col index). |
+| `end` | `(row, col)` | — | *(required)* | End cell (zero-based row/col index). |
+| `curvature_factor` | float | 0.0 – 1.0 | 0.0 | Soft penalty for sharp turns. 0 = standard LCP; 1 = maximum smoothing. |
+| `max_turning_angle` | float | 0 – 180 | 180.0 | Hard upper limit on turning angle (degrees). 180 = unrestricted. |
+| `distance_factor` | float | 0.0 – 1.0 | 0.0 | Weight for path length. Higher ⇒ shorter paths preferred. |
+| `straighten_factor` | float | 0.0 – 0.5 | 0.3 | Controls how far ahead the straightening step looks for shortcuts. |
+| `cost_tolerance` | float | ≥ 1.0 | 1.05 | Maximum allowed ratio of shortcut cost to original path cost. |
 | `cell_size` | `(y, x)` | — | `(1, 1)` | Physical cell dimensions in map units. |
 
-## Output
-
-A dictionary with:
+### Output dictionary
 
 | Key | Type | Description |
 |---|---|---|
-| `path` | `list[(row, col)]` | Ordered cell coordinates from start to end. |
-| `smoothed_path` | `list[(float, float)]` | Smoothed path with rounded turns (fractional row/col). |
-| `total_cost` | `float` | Accumulated cost along the path. |
-| `path_length` | `float` | Physical path length in map units. |
+| `path` | `list[(int, int)]` | Raw 8-connected grid path from start to end. |
+| `straightened_path` | `list[(float, float)]` | Path after cost-aware LOS straightening. |
+| `smoothed_path` | `list[(float, float)]` | Final Chaikin-smoothed path with rounded corners. |
+| `total_cost` | `float` | Accumulated cost along the optimal grid path. |
+| `path_length` | `float` | Physical length of the grid path in map units. |
 | `directions` | `list[int]` | Direction index (0–7) at each step. |
 | `turning_angles` | `list[float]` | Turning angle in degrees at each interior vertex. |
 
 ---
 
-## Quick Start (Standalone)
+## 5. Quick Start
+
+### 5.1 Standalone Python
+
+**Install dependencies:**
 
 ```bash
-pip install numpy rasterio
+pip install numpy rasterio        # minimum
+pip install numba                  # optional — 20–50× speedup on large rasters
 ```
+
+**Basic usage:**
 
 ```python
 import numpy as np
-from enhanced_lcp import enhanced_least_cost_path
+from pure_python.cost_aware_straighten_lcp import cost_aware_least_cost_path
 
-# Example: 50×50 cost raster with random costs 1–10
-raster = np.random.default_rng(0).uniform(1, 10, (50, 50))
+# Example: 200×200 random cost raster
+raster = np.random.default_rng(0).uniform(1, 10, (200, 200)).astype("float32")
 
-result = enhanced_least_cost_path(
+result = cost_aware_least_cost_path(
     raster,
     start=(0, 0),
-    end=(49, 49),
-    curvature_factor=0.5,      # moderate smoothing
-    max_turning_angle=90.0,    # turns limited to ≤ 90°
-    distance_factor=0.3,       # mildly prefer shorter paths
+    end=(199, 199),
+    curvature_factor=0.5,       # smooth turns
+    max_turning_angle=135.0,    # no near-U-turns
+    distance_factor=0.3,        # mildly prefer shorter paths
+    straighten_factor=0.3,      # moderate post-processing straightening
+    cost_tolerance=1.05,        # allow 5% cost overhead in shortcuts
 )
 
-print(f"Path length : {result['path_length']:.1f}")
-print(f"Total cost  : {result['total_cost']:.1f}")
-print(f"Max turn    : {max(result['turning_angles']):.0f}°")
-print(f"Smoothed pts: {len(result['smoothed_path'])}")
+print(f"Grid path cells    : {len(result['path'])}")
+print(f"Straightened points: {len(result['straightened_path'])}")
+print(f"Smoothed points    : {len(result['smoothed_path'])}")
+print(f"Total cost         : {result['total_cost']:.2f}")
+print(f"Path length        : {result['path_length']:.2f} map units")
+print(f"Max turn angle     : {max(result['turning_angles']):.0f}°")
 ```
 
-## Quick Start (ArcGIS Pro)
-
-1. Copy `enhanced_lcp.py` and `arcgis_toolbox.pyt` into the same folder.
-2. In ArcGIS Pro → Catalog → Toolboxes → **Add Toolbox** → select
-   `arcgis_toolbox.pyt`.
-3. Open the *Enhanced Least Cost Path* tool and fill in the parameters.
-
-## File I/O Helpers
+**Numba-accelerated version** (drop-in replacement, requires `numba`):
 
 ```python
-from enhanced_lcp import load_cost_raster, save_path_raster
+from numba_accelerated.cost_aware_straighten_lcp import cost_aware_least_cost_path
 
-data, meta = load_cost_raster("cost_surface.tif")
-result = enhanced_least_cost_path(data, (10, 20), (200, 300),
-                                  cell_size=meta["cell_size"])
-save_path_raster("path_output.tif", result["path"], meta)
+result = cost_aware_least_cost_path(raster, (0, 0), (199, 199),
+                                    curvature_factor=0.5)
+```
+
+**Loading a GeoTIFF cost raster:**
+
+```python
+import rasterio
+import numpy as np
+from pure_python.cost_aware_straighten_lcp import cost_aware_least_cost_path
+
+with rasterio.open("cost_surface.tif") as src:
+    data = src.read(1).astype("float64")
+    data[data == src.nodata] = np.nan          # mark NODATA as barriers
+    cell_y = abs(src.transform.e)              # pixel height in map units
+    cell_x = abs(src.transform.a)              # pixel width  in map units
+
+result = cost_aware_least_cost_path(
+    data,
+    start=(row_start, col_start),
+    end=(row_end, col_end),
+    cell_size=(cell_y, cell_x),
+)
+```
+
+### 5.2 ArcGIS Pro
+
+1. **Download** `EnhancedCostPath_ArcGIS.zip` from the
+   [Releases page](../../releases/latest) and unzip it to a local folder.
+2. In **ArcGIS Pro** → **Catalog** pane → **Toolboxes** → right-click →
+   **Add Toolbox** → navigate to `arcgis_toolbox_with_progress.pyt`.
+3. Expand the toolbox; you will see two tools:
+   - **Cost-Aware LCP (Pure Python)** — works without additional dependencies.
+   - **Cost-Aware LCP (Numba Accelerated)** — requires `numba` in the
+     ArcGIS Pro Python environment
+     (`conda install -c conda-forge numba`).
+4. Double-click the desired tool, fill in the parameters, and click **Run**.
+   Progress is reported step-by-step in the Geoprocessing pane.
+
+---
+
+## 6. Download
+
+| Package | Contents | When to use |
+|---|---|---|
+| [EnhancedCostPath_ArcGIS.zip](../../releases/latest) | Toolbox + algorithm packages | ArcGIS Pro users |
+| [EnhancedCostPath_Standalone.zip](../../releases/latest) | Algorithm packages only | Standalone Python / no ArcGIS |
+
+To build packages yourself, run `bash release/build_release.sh` from the
+repository root.  See [release/README.md](release/README.md) for details.
+
+---
+
+## 7. Repository Layout
+
+```
+Enhanced_CostPath_withParameters/
+├── arcgis_toolbox_with_progress.pyt   ← ArcGIS Python Toolbox (latest)
+├── pure_python/
+│   └── cost_aware_straighten_lcp.py   ← Primary algorithm (pure Python)
+├── numba_accelerated/
+│   └── cost_aware_straighten_lcp.py   ← Numba JIT-accelerated algorithm
+├── tests/                             ← Pytest test suite
+├── docs/
+│   ├── generate_readme_figures.py     ← Regenerate README images
+│   ├── images/                        ← Figures used in this README
+│   ├── COST_AWARE_LCP_EN.md           ← Detailed English algorithm docs
+│   ├── COST_AWARE_LCP_CN.md           ← Detailed Chinese algorithm docs
+│   ├── TOOL_REPORT_CN.md              ← Development report (Chinese)
+│   └── PERFORMANCE_ANALYSIS_CN.md    ← Performance analysis (Chinese)
+├── release/
+│   ├── README.md                      ← Packaging instructions
+│   └── build_release.sh               ← Script to build distributable zips
+├── archive/                           ← Earlier algorithm variants (Approaches A & B)
+├── requirements.txt
+├── README.md                          ← This file (English)
+└── README_CN.md                       ← Chinese translation
 ```
 
 ---
 
-## Running Tests
+## 8. Running Tests
 
 ```bash
+# Install test dependencies
 pip install pytest numpy
+
+# Run pure-Python tests (no numba required)
+python -m pytest tests/test_cost_aware_straighten_lcp.py tests/test_progress_callback.py -v
+
+# Run all tests (includes Numba-accelerated variant)
+pip install numba
 python -m pytest tests/ -v
 ```
 
 ---
 
-## Licence
+## 9. Licence
 
 MIT
+
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions: The above copyright
+notice and this permission notice shall be included in all copies or
+substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS",
+WITHOUT WARRANTY OF ANY KIND.
+```
