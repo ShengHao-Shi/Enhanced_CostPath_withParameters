@@ -1,5 +1,5 @@
 # Enhanced Cost Path with Parameters
-
+![Algorithm pipeline: grid path → straightened → smoothed](docs/images/pipeline_steps.png)
 > **中文文档** → [README_CN.md](README_CN.md)
 
 A GIS tool that extends the standard Least Cost Path (LCP) algorithm with
