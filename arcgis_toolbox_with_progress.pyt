@@ -283,8 +283,22 @@ def _read_inputs(parameters):
     output_fc = parameters[8].valueAsText
 
     raster = arcpy.Raster(cost_raster_path)
-    cost_array = arcpy.RasterToNumPyArray(raster, nodata_to_value=np.nan)
-    cost_array = cost_array.astype(np.float32)
+    nodata_val = raster.noDataValue
+    if raster.isInteger:
+        # Integer rasters do not support NaN as nodata_to_value;
+        # use the raster's own nodata value as sentinel (or a fallback),
+        # convert to float, then replace with NaN.
+        sentinel = int(nodata_val) if nodata_val is not None else -9999
+        cost_array = arcpy.RasterToNumPyArray(
+            raster, nodata_to_value=sentinel
+        )
+        cost_array = cost_array.astype(np.float32)
+        cost_array[cost_array == sentinel] = np.nan
+    else:
+        cost_array = arcpy.RasterToNumPyArray(
+            raster, nodata_to_value=np.nan
+        )
+        cost_array = cost_array.astype(np.float32)
     cell_x = raster.meanCellWidth
     cell_y = raster.meanCellHeight
     extent = raster.extent
