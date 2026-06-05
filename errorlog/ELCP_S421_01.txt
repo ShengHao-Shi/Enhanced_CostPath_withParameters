@@ -1,0 +1,8 @@
+﻿Traceback (most recent call last):
+﻿  File "<string>", line 351, in execute
+﻿  File "<string>", line 286, in _read_inputs
+﻿  File "C:\Program Files\ArcGIS\Pro\Resources\ArcPy\arcpy\__init__.py", line 2478, in RasterToNumPyArray
+﻿    return _RasterToNumPyArray(*args, **kwargs)
+﻿           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+﻿ValueError: Argument nodata_to_value: Integer types do not support NaN or infinite values.
+Failed to execute (CostAwareLCPTool).
