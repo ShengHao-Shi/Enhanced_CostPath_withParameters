@@ -525,7 +525,7 @@ def _make_survey_aware_params():
 
     # Safety threshold – optional, sits after survey raster.
     p_threshold = arcpy.Parameter(
-        displayName="Safety Threshold (risk cells above this are impassable)",
+        displayName="Safety Threshold (risk cells above this are penalised)",
         name="safety_threshold",
         datatype="GPDouble",
         parameterType="Optional",
@@ -562,6 +562,19 @@ def _make_survey_aware_params():
     p_nodata.value = "unsurveyed"
     params.insert(4, p_nodata)
 
+    # Penalty multiplier – controls how strongly above-threshold cells are penalised.
+    p_penalty = arcpy.Parameter(
+        displayName="Safety Penalty Multiplier (>= 0.0; higher = stronger avoidance)",
+        name="penalty_multiplier",
+        datatype="GPDouble",
+        parameterType="Optional",
+        direction="Input",
+    )
+    p_penalty.value = 10.0
+    p_penalty.filter.type = "Range"
+    p_penalty.filter.list = [0.0, 1000.0]
+    params.insert(5, p_penalty)
+
     return params
 
 
@@ -574,37 +587,42 @@ def _read_survey_inputs(parameters):
       2  safety_threshold     <- new
       3  survey_weight        <- new
       4  survey_nodata_as     <- new
-      5  start_point
-      6  end_point
-      7  curvature_factor
-      8  max_turning_angle
-      9  distance_factor
-      10 straighten_factor
-      11 cost_tolerance
-      12 output_path
+      5  penalty_multiplier   <- new
+      6  start_point
+      7  end_point
+      8  curvature_factor
+      9  max_turning_angle
+      10 distance_factor
+      11 straighten_factor
+      12 cost_tolerance
+      13 output_path
     """
     cost_raster_path = parameters[0].valueAsText
     survey_raster_path = parameters[1].valueAsText
     safety_threshold = float(parameters[2].value or 100.0)
     survey_weight = float(parameters[3].value or 0.3)
     survey_nodata_as = parameters[4].valueAsText or "unsurveyed"
-    start_fc = parameters[5].valueAsText
-    end_fc = parameters[6].valueAsText
-    curvature_factor = float(parameters[7].value or 0.0)
-    max_turning_angle_val = parameters[8].value
+    penalty_multiplier_val = parameters[5].value
+    penalty_multiplier = float(
+        penalty_multiplier_val if penalty_multiplier_val is not None else 10.0
+    )
+    start_fc = parameters[6].valueAsText
+    end_fc = parameters[7].valueAsText
+    curvature_factor = float(parameters[8].value or 0.0)
+    max_turning_angle_val = parameters[9].value
     max_turning_angle = float(
         max_turning_angle_val if max_turning_angle_val is not None else 180.0
     )
-    distance_factor = float(parameters[9].value or 0.0)
-    straighten_factor_val = parameters[10].value
+    distance_factor = float(parameters[10].value or 0.0)
+    straighten_factor_val = parameters[11].value
     straighten_factor = float(
         straighten_factor_val if straighten_factor_val is not None else 0.3
     )
-    cost_tolerance_val = parameters[11].value
+    cost_tolerance_val = parameters[12].value
     cost_tolerance = float(
         cost_tolerance_val if cost_tolerance_val is not None else 1.05
     )
-    output_fc = parameters[12].valueAsText
+    output_fc = parameters[13].valueAsText
 
     # Read the start/end points before loading raster arrays so that only the
     # sub-region around the route is read (avoids the ArcPy pixel-block size
@@ -651,6 +669,7 @@ def _read_survey_inputs(parameters):
         "safety_threshold": safety_threshold,
         "survey_weight": survey_weight,
         "survey_nodata_as": survey_nodata_as,
+        "penalty_multiplier": penalty_multiplier,
         "start_rc": start_rc,
         "end_rc": end_rc,
         "curvature_factor": curvature_factor,
@@ -678,7 +697,7 @@ def _log_survey_result(messages, tag, result, elapsed):
         f"  Path length: {result['path_length']:.2f}\n"
         f"  Survey score: {result['survey_score']:.2%} "
         f"(gap/minimal coverage cells on path)\n"
-        f"  Cells blocked by safety threshold: {result['blocked_cells_count']}"
+        f"  Cells above safety threshold (penalised): {result['above_threshold_count']}"
     )
 
 
@@ -694,8 +713,9 @@ class SurveyAwareLCPTool:
         self.label = "Survey-Aware LCP (Pure Python)"
         self.description = (
             "Plan routes for hydrographic survey vessels. "
-            "Applies a hard safety threshold on the risk raster and a soft "
-            "survey-value objective based on a CATZOC coverage raster, "
+            "Applies a soft safety penalty on risk cells above a threshold "
+            "(controlled by the penalty multiplier) and a survey-value "
+            "objective based on a CATZOC coverage raster, "
             "attracting the path through under-surveyed areas. "
             "Uses pure Python for maximum compatibility."
         )
@@ -737,6 +757,7 @@ class SurveyAwareLCPTool:
             safety_threshold=inputs["safety_threshold"],
             survey_weight=inputs["survey_weight"],
             survey_nodata_as=inputs["survey_nodata_as"],
+            penalty_multiplier=inputs["penalty_multiplier"],
             curvature_factor=inputs["curvature_factor"],
             max_turning_angle=inputs["max_turning_angle"],
             distance_factor=inputs["distance_factor"],
@@ -778,9 +799,10 @@ class SurveyAwareNumbaLCPTool:
         self.description = (
             "Plan routes for hydrographic survey vessels using the "
             "Numba JIT-compiled Dijkstra search (20–50x faster on large "
-            "rasters). Applies a hard safety threshold on the risk raster "
-            "and a soft survey-value objective based on a CATZOC coverage "
-            "raster. Note: the first call has ~6 s JIT compilation overhead."
+            "rasters). Applies a soft safety penalty on risk cells above a "
+            "threshold (controlled by the penalty multiplier) and a "
+            "survey-value objective based on a CATZOC coverage raster. "
+            "Note: the first call has ~6 s JIT compilation overhead."
         )
         self.canRunInBackground = True
 
@@ -828,6 +850,7 @@ class SurveyAwareNumbaLCPTool:
             safety_threshold=inputs["safety_threshold"],
             survey_weight=inputs["survey_weight"],
             survey_nodata_as=inputs["survey_nodata_as"],
+            penalty_multiplier=inputs["penalty_multiplier"],
             curvature_factor=inputs["curvature_factor"],
             max_turning_angle=inputs["max_turning_angle"],
             distance_factor=inputs["distance_factor"],

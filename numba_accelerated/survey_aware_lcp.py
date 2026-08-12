@@ -40,6 +40,7 @@ def survey_aware_least_cost_path(
     safety_threshold: float = 100.0,
     survey_weight: float = 0.3,
     survey_nodata_as: str = "unsurveyed",
+    penalty_multiplier: float = 10.0,
     curvature_factor: float = 0.0,
     max_turning_angle: float = 180.0,
     distance_factor: float = 0.0,
@@ -68,12 +69,17 @@ def survey_aware_least_cost_path(
     end : tuple[int, int]
         ``(row, col)`` of the end cell.
     safety_threshold : float, optional
-        Risk cells above this are masked to NaN. Default 100.
+        Risk value above which a linear penalty is applied.  Cells are
+        *not* masked to NaN; the path avoids them via higher cost.
+        Default 100.
     survey_weight : float, optional
         Survey-objective weight in [0.0, 1.0]. Default 0.3.
     survey_nodata_as : str, optional
         How NaN survey cells are handled: ``"unsurveyed"`` or ``"surveyed"``.
         Default ``"unsurveyed"``.
+    penalty_multiplier : float, optional
+        Strength of the linear cost penalty for cells above
+        ``safety_threshold``.  Default 10.0.  Set to 0.0 to disable.
     curvature_factor : float, optional
         Soft turn penalty (0.0–1.0). Default 0.0.
     max_turning_angle : float, optional
@@ -105,7 +111,7 @@ def survey_aware_least_cost_path(
 
     _validate_survey_params(
         risk_raster, survey_raster, start, end,
-        safety_threshold, survey_weight, survey_nodata_as,
+        safety_threshold, survey_weight, survey_nodata_as, penalty_multiplier,
     )
 
     if progress_callback:
@@ -117,14 +123,15 @@ def survey_aware_least_cost_path(
         )
 
     # --- Preprocessing (pure NumPy – no Numba needed) -------------------------
-    composite, blocked_cells_count = build_composite_cost(
-        risk_raster, survey_raster, safety_threshold, survey_weight, survey_nodata_as,
+    composite, above_threshold_count = build_composite_cost(
+        risk_raster, survey_raster, safety_threshold, survey_weight,
+        survey_nodata_as, penalty_multiplier,
     )
 
     if progress_callback:
         progress_callback(
             f"[Survey-Aware / Numba] Composite cost raster built. "
-            f"Cells blocked by safety threshold: {blocked_cells_count}"
+            f"Cells above safety threshold (penalised): {above_threshold_count}"
         )
 
     # --- Numba-accelerated Dijkstra search ------------------------------------
@@ -146,7 +153,7 @@ def survey_aware_least_cost_path(
 
     result["survey_coverage_profile"] = profile
     result["survey_score"] = survey_score
-    result["blocked_cells_count"] = blocked_cells_count
+    result["above_threshold_count"] = above_threshold_count
     result["composite_cost_raster"] = composite
 
     if progress_callback:

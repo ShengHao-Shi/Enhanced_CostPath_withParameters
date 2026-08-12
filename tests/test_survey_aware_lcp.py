@@ -72,20 +72,25 @@ class TestValidation:
                                          survey_nodata_as="bad_value")
 
     def test_start_blocked_by_threshold(self):
+        # With the soft-penalty design, start/end above the safety threshold are
+        # *not* errors – they just receive a higher cost.  Only NaN/Inf cells
+        # are truly impassable.
         risk = np.full((5, 5), 50.0)
-        risk[0, 0] = 200.0  # start cell exceeds threshold
+        risk[0, 0] = 200.0  # start cell exceeds threshold but is still passable
         survey = np.zeros((5, 5))
-        with pytest.raises(ValueError, match="Start point"):
-            survey_aware_least_cost_path(risk, survey, (0, 0), (4, 4),
-                                         safety_threshold=100)
+        # Should succeed without raising
+        result = survey_aware_least_cost_path(risk, survey, (0, 0), (4, 4),
+                                              safety_threshold=100)
+        assert result["path"][0] == (0, 0)
 
     def test_end_blocked_by_threshold(self):
+        # Same as above: end above threshold is penalised, not blocked.
         risk = np.full((5, 5), 50.0)
-        risk[4, 4] = 200.0  # end cell exceeds threshold
+        risk[4, 4] = 200.0  # end cell exceeds threshold but is still passable
         survey = np.zeros((5, 5))
-        with pytest.raises(ValueError, match="End point"):
-            survey_aware_least_cost_path(risk, survey, (0, 0), (4, 4),
-                                         safety_threshold=100)
+        result = survey_aware_least_cost_path(risk, survey, (0, 0), (4, 4),
+                                              safety_threshold=100)
+        assert result["path"][-1] == (4, 4)
 
     def test_start_out_of_bounds(self):
         risk = np.ones((5, 5))
@@ -127,15 +132,25 @@ class TestBuildCompositeCost:
         np.testing.assert_allclose(composite, expected)
 
     def test_safety_masking(self):
-        """Cells above threshold must become NaN."""
+        """Cells above threshold must be penalised but still finite (passable)."""
         risk = np.array([[10.0, 150.0], [30.0, 40.0]])
         survey = np.zeros((2, 2))
-        composite, blocked = build_composite_cost(risk, survey,
-                                                   safety_threshold=100,
-                                                   survey_weight=0.5)
-        assert blocked == 1
-        assert not np.isfinite(composite[0, 1]), "Masked cell should be NaN"
-        assert np.isfinite(composite[0, 0]), "Non-masked cell should be finite"
+        composite, above_count = build_composite_cost(risk, survey,
+                                                       safety_threshold=100,
+                                                       survey_weight=0.5)
+        assert above_count == 1
+        # The above-threshold cell should be finite (penalised, not masked).
+        assert np.isfinite(composite[0, 1]), "Penalised cell should remain finite"
+        assert np.isfinite(composite[0, 0]), "Non-penalised cell should be finite"
+        # With penalty_multiplier > 0 the above-threshold cell has a higher
+        # composite cost than when the penalty is disabled.
+        composite_no_penalty, _ = build_composite_cost(risk, survey,
+                                                        safety_threshold=100,
+                                                        survey_weight=0.5,
+                                                        penalty_multiplier=0.0)
+        assert composite[0, 1] >= composite_no_penalty[0, 1], (
+            "Penalised cell should cost at least as much as with no penalty"
+        )
 
     def test_survey_nodata_as_unsurveyed(self):
         """NaN survey cells treated as CATZOC 0 should lower composite cost."""
@@ -158,19 +173,21 @@ class TestBuildCompositeCost:
         """NaN cells in risk_raster stay NaN regardless of threshold."""
         risk = np.array([[np.nan, 50.0], [30.0, 40.0]])
         survey = np.zeros((2, 2))
-        composite, blocked = build_composite_cost(risk, survey,
-                                                   safety_threshold=200,
-                                                   survey_weight=0.3)
-        assert blocked == 0  # threshold didn't mask anything
+        composite, above_count = build_composite_cost(risk, survey,
+                                                       safety_threshold=200,
+                                                       survey_weight=0.3)
+        assert above_count == 0  # threshold didn't penalise anything
         assert not np.isfinite(composite[0, 0])
 
     def test_composite_values_in_range(self):
-        """All finite composite values must lie in [0, 1]."""
+        """Without a penalty multiplier, all finite composite values must lie in [0, 1]."""
         rng = np.random.default_rng(42)
         risk = rng.uniform(1, 100, (20, 20))
         survey = rng.integers(0, 4, (20, 20)).astype(float)
+        # Use penalty_multiplier=0 so no amplification occurs.
         composite, _ = build_composite_cost(risk, survey, safety_threshold=80,
-                                            survey_weight=0.4)
+                                            survey_weight=0.4,
+                                            penalty_multiplier=0.0)
         finite = composite[np.isfinite(composite)]
         assert finite.min() >= -1e-9
         assert finite.max() <= 1.0 + 1e-9
@@ -222,7 +239,7 @@ class TestEndToEnd:
         for key in ("path", "straightened_path", "smoothed_path",
                     "total_cost", "path_length",
                     "survey_coverage_profile", "survey_score",
-                    "blocked_cells_count", "composite_cost_raster"):
+                    "above_threshold_count", "composite_cost_raster"):
             assert key in result, f"Missing key: {key}"
 
     def test_weight_zero_ignores_survey(self, uniform_risk):
@@ -258,22 +275,25 @@ class TestEndToEnd:
         assert result_high_weight["survey_score"] >= result_no_weight["survey_score"]
 
     def test_barrier_avoidance(self):
-        """Cells above safety_threshold must not appear in the path."""
+        """Cells with high risk should be strongly avoided (soft penalty).
+        With a large penalty_multiplier, the path should route around them."""
         risk = np.ones((5, 10)) * 20.0
-        risk[2, 3:7] = 200.0  # high-risk barrier row
+        risk[2, 3:7] = 200.0  # high-risk row – penalised but not blocked
         survey = np.zeros((5, 10))
 
         result = survey_aware_least_cost_path(
-            risk, survey, (2, 0), (2, 9), safety_threshold=100
+            risk, survey, (2, 0), (2, 9),
+            safety_threshold=100, penalty_multiplier=50.0
         )
+        # With a 50× multiplier the path should avoid the high-risk cells.
         for r, c in result["path"]:
-            assert risk[r, c] <= 100.0, (
+            assert risk[r, c] <= 100.0 or (r, c) == (2, 0) or (r, c) == (2, 9), (
                 f"Path passed through high-risk cell ({r}, {c}) "
                 f"with risk {risk[r, c]}"
             )
 
-    def test_blocked_cells_count(self):
-        """blocked_cells_count must equal the number of risk cells above threshold."""
+    def test_above_threshold_count(self):
+        """above_threshold_count must equal the number of risk cells above threshold."""
         risk = np.ones((5, 5)) * 30.0
         risk[2, 2] = 150.0
         risk[3, 3] = 120.0
@@ -282,7 +302,7 @@ class TestEndToEnd:
         result = survey_aware_least_cost_path(
             risk, survey, (0, 0), (4, 4), safety_threshold=100
         )
-        assert result["blocked_cells_count"] == 2
+        assert result["above_threshold_count"] == 2
 
     def test_progress_callback_called(self, uniform_risk, uniform_survey):
         messages = []
@@ -308,8 +328,8 @@ class TestEndToEnd:
 
     def test_no_path_raises(self):
         risk = np.ones((5, 10)) * 20.0
-        # Create a full vertical wall that blocks all paths
-        risk[:, 5] = 200.0
+        # Create a full vertical wall of NaN cells that blocks all paths.
+        risk[:, 5] = np.nan
         survey = np.zeros((5, 10))
         with pytest.raises(RuntimeError, match="No path"):
             survey_aware_least_cost_path(

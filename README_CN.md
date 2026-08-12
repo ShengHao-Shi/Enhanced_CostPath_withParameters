@@ -383,14 +383,19 @@ CATZOC 栅格须与风险栅格完成投影对齐（相同 cell size，并 snap 
 
 工具在调用 Dijkstra 搜索前完成以下预处理：
 
-**步骤 1：安全蒙版（硬约束）**
+**步骤 1：安全惩罚（软约束）**
+
+超过 `safety_threshold` 的格元**不会**被设为 NaN，而是对其风险值施加线性惩罚，使路径强烈倾向于绕开危险区域，但在无更安全路线时仍可通过：
 ```
-risk > safety_threshold → NaN（不可通行）
+excess         = risk - safety_threshold              （仅对 risk > threshold 的格元）
+penalty_factor = 1 + penalty_multiplier × excess / safety_threshold
+risk_penalised = risk × penalty_factor
 ```
+原本为 NaN/Inf 的格元仍为不可通行硬屏障，不受此惩罚机制影响。
 
 **步骤 2：合成代价栅格（软目标）**
 ```
-norm_risk         = risk / max(有效 risk 值)
+norm_risk         = risk_penalised / max(有效惩罚后 risk 值)
 survey_component  = CATZOC_value / 3       # 0=最低代价，3=最高代价
 composite         = (1 - survey_weight) × norm_risk
                   + survey_weight × survey_component
@@ -402,7 +407,8 @@ composite         = (1 - survey_weight) × norm_risk
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `safety_threshold` | 100 | risk 值硬上限，超过即不可通行 |
+| `safety_threshold` | 100 | risk 值软上限；超过此值的格元将被线性惩罚，仍可通行 |
+| `penalty_multiplier` | 10.0 | 惩罚强度；值越大路径越倾向于绕开超阈值格元；设为 0 禁用惩罚 |
 | `survey_weight` | 0.3 | 测绘目标权重（0=纯安全，1=纯测绘价值） |
 | `survey_nodata_as` | `"unsurveyed"` | CATZOC 空值处理方式 |
 
@@ -412,7 +418,7 @@ composite         = (1 - survey_weight) × norm_risk
 |---|---|
 | `survey_coverage_profile` | 路径经过每个格子的 CATZOC 原始值列表 |
 | `survey_score` | 路径中 CATZOC ≤ 1（Gap/Minimal）格子的占比，越高越好 |
-| `blocked_cells_count` | 被 `safety_threshold` 屏蔽的格子数（调试用） |
+| `above_threshold_count` | 风险值超过 `safety_threshold` 的格子数（已惩罚，但仍可通行）（调试用） |
 | `composite_cost_raster` | 实际输入 Dijkstra 搜索的合成代价栅格 |
 
 ### 10.5 使用示例（Python API）
@@ -430,14 +436,15 @@ result = survey_aware_least_cost_path(
     catzoc,
     start=(0, 0),
     end=(199, 199),
-    safety_threshold=100,   # cells with risk > 100 are impassable
-    survey_weight=0.3,      # 30% survey priority, 70% risk minimisation
-    curvature_factor=0.5,   # smooth turns
+    safety_threshold=100,     # cells with risk > 100 are heavily penalised
+    penalty_multiplier=10.0,  # penalty strength (higher = stronger avoidance)
+    survey_weight=0.3,        # 30% survey priority, 70% risk minimisation
+    curvature_factor=0.5,     # smooth turns
 )
 
 print(f"Survey score: {result['survey_score']:.1%} "
       f"of path through gap/minimal-coverage water")
-print(f"Blocked by threshold: {result['blocked_cells_count']} cells")
+print(f"Above threshold (penalised): {result['above_threshold_count']} cells")
 ```
 
 ### 10.6 ArcGIS 工具箱使用
@@ -449,7 +456,8 @@ print(f"Blocked by threshold: {result['blocked_cells_count']} cells")
 
 参数界面在原有 Cost-Aware LCP 工具基础上新增：
 1. **Survey Coverage Raster** — CATZOC 栅格图层（必填）
-2. **Safety Threshold** — 风险值上限（默认 100）
+2. **Safety Threshold** — 风险值软上限（默认 100）；超过此值的格元将被惩罚
 3. **Survey Weight** — 测绘权重滑块 0.0–1.0（默认 0.3）
 4. **Survey NODATA Treatment** — 空值处理（`unsurveyed` / `surveyed`）
+5. **Safety Penalty Multiplier** — 惩罚强度（默认 10.0）；值越大对超阈值区域的绕避越强烈
 

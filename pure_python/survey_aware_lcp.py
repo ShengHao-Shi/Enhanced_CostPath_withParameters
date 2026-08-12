@@ -11,21 +11,27 @@ Design
 Two independent objectives are balanced via a composite cost raster built
 before the Dijkstra search:
 
-1. **Safety constraint (hard)**: cells whose risk value exceeds
-   ``safety_threshold`` are masked to NaN and are unreachable.
+1. **Safety penalty (soft)**: cells whose risk value exceeds
+   ``safety_threshold`` receive a linear cost multiplier so that the path
+   strongly prefers to avoid them while still being able to pass through
+   when no safer alternative exists.  The multiplier is::
+
+       penalty_factor = 1 + penalty_multiplier * (risk - threshold) / threshold
+
+   Cells that are originally NaN/Inf remain fully impassable (hard barrier).
 2. **Survey-value objective (soft)**: cells with low CATZOC coverage
    (Gap / void-of-soundings) are cheaper to traverse, encouraging the
    path to collect data in under-surveyed areas.
 
 The composite cost formula is::
 
-    composite = (1 - survey_weight) * norm_risk
+    composite = (1 - survey_weight) * norm_risk_penalised
               + survey_weight       * (1 - norm_survey_cost)
 
 where::
 
-    norm_risk         = risk_raster / max(finite risk values after masking)
-    norm_survey_cost  = (3 - survey_raster) / 3   # inverted and normalised
+    norm_risk_penalised = risk_penalised / max(finite penalised risk values)
+    norm_survey_cost    = (3 - survey_raster) / 3   # inverted and normalised
 
 CATZOC values and their meaning
 ---------------------------------
@@ -41,7 +47,7 @@ Public API
 ----------
 ``survey_aware_least_cost_path(risk_raster, survey_raster, start, end, ...)``
     Main entry point – mirrors the signature of
-    ``cost_aware_least_cost_path`` plus the three new parameters.
+    ``cost_aware_least_cost_path`` plus the four new parameters.
 
 Dependencies: numpy (required).  Delegates all path-finding to
 ``pure_python.cost_aware_straighten_lcp``.
@@ -83,6 +89,7 @@ def _validate_survey_params(
     safety_threshold: float,
     survey_weight: float,
     survey_nodata_as: str,
+    penalty_multiplier: float = 10.0,
 ) -> None:
     """Validate survey-specific parameters before preprocessing."""
     if risk_raster.ndim != 2:
@@ -103,6 +110,10 @@ def _validate_survey_params(
         raise ValueError(
             f"safety_threshold must be >= 0, got {safety_threshold}"
         )
+    if penalty_multiplier < 0:
+        raise ValueError(
+            f"penalty_multiplier must be >= 0, got {penalty_multiplier}"
+        )
     if survey_nodata_as not in ("unsurveyed", "surveyed"):
         raise ValueError(
             "survey_nodata_as must be 'unsurveyed' (treat as CATZOC 0) "
@@ -110,7 +121,6 @@ def _validate_survey_params(
             f"got '{survey_nodata_as}'"
         )
 
-    # Check that start/end are not masked by the safety threshold.
     sr, sc = start
     rows, cols = risk_raster.shape
     if not (0 <= sr < rows and 0 <= sc < cols):
@@ -123,7 +133,7 @@ def _validate_survey_params(
             f"End point {end} is outside raster bounds ({rows}, {cols})"
         )
 
-    # Warn if start/end are already NaN before threshold masking
+    # Only hard barriers (NaN/Inf) make a cell truly impassable.
     if not np.isfinite(risk_raster[sr, sc]):
         raise ValueError(
             f"Start point {start} is on an invalid (NaN/Inf) cell in risk_raster"
@@ -131,20 +141,6 @@ def _validate_survey_params(
     if not np.isfinite(risk_raster[er, ec]):
         raise ValueError(
             f"End point {end} is on an invalid (NaN/Inf) cell in risk_raster"
-        )
-
-    # Check start/end are not blocked by safety threshold
-    if risk_raster[sr, sc] > safety_threshold:
-        raise ValueError(
-            f"Start point {start} has risk value {risk_raster[sr, sc]:.1f} "
-            f"which exceeds safety_threshold {safety_threshold}. "
-            "Lower the threshold or choose a different start point."
-        )
-    if risk_raster[er, ec] > safety_threshold:
-        raise ValueError(
-            f"End point {end} has risk value {risk_raster[er, ec]:.1f} "
-            f"which exceeds safety_threshold {safety_threshold}. "
-            "Lower the threshold or choose a different end point."
         )
 
 
@@ -159,6 +155,7 @@ def build_composite_cost(
     safety_threshold: float,
     survey_weight: float,
     survey_nodata_as: str = "unsurveyed",
+    penalty_multiplier: float = 10.0,
 ) -> Tuple[np.ndarray, int]:
     """Build the composite cost raster used as input to the LCP algorithm.
 
@@ -171,35 +168,50 @@ def build_composite_cost(
         2-D array of CATZOC coverage values (0–3).
         NaN cells are handled according to ``survey_nodata_as``.
     safety_threshold : float
-        Risk cells above this value are masked to NaN (impassable).
+        Risk value above which a linear cost penalty is applied.
+        Cells are *not* masked to NaN; instead their composite cost
+        is multiplied by ``1 + penalty_multiplier * excess / threshold``,
+        where ``excess = risk - safety_threshold``.
+        Only the original NaN/Inf cells remain truly impassable.
     survey_weight : float
         Weight of the survey objective in [0.0, 1.0].
         * 0.0 → pure risk minimisation (identical to original ELCP).
-        * 1.0 → pure survey-value maximisation (safety threshold still applies).
+        * 1.0 → pure survey-value maximisation.
     survey_nodata_as : str
         How to handle NaN cells in ``survey_raster``.
         * ``"unsurveyed"`` (default) → treat as CATZOC 0 (highest priority).
         * ``"surveyed"``              → treat as CATZOC 3 (no survey value).
+    penalty_multiplier : float
+        Controls how strongly cells above ``safety_threshold`` are penalised.
+        A value of 10.0 (default) means a cell whose risk is exactly
+        2× the threshold receives 11× the baseline composite cost.
+        Set to 0.0 to disable the penalty entirely.
 
     Returns
     -------
     composite : numpy.ndarray
         Float64 composite cost array ready for the Dijkstra search.
         NaN cells are impassable.
-    blocked_cells_count : int
-        Number of cells masked by the safety threshold.
+    above_threshold_count : int
+        Number of cells whose risk exceeds ``safety_threshold``
+        (informational; these cells are penalised but still passable).
     """
     risk = np.array(risk_raster, dtype=np.float64)
     survey = np.array(survey_raster, dtype=np.float64)
 
-    # --- Step 1: Safety masking -----------------------------------------------
-    # Cells originally NaN/Inf are already barriers; additionally mask risk > threshold.
+    # --- Step 1: Identify cells that are intrinsically invalid ----------------
+    # Only NaN/Inf cells are true hard barriers; threshold excess is soft.
     originally_invalid = ~np.isfinite(risk)
-    threshold_blocked = np.isfinite(risk) & (risk > safety_threshold)
-    risk[threshold_blocked] = np.nan
-    blocked_cells_count = int(np.sum(threshold_blocked))
 
-    # --- Step 2: Handle CATZOC NaN values ------------------------------------
+    # --- Step 2: Apply linear penalty for cells above safety_threshold --------
+    above_threshold_mask = np.isfinite(risk) & (risk > safety_threshold)
+    above_threshold_count = int(np.sum(above_threshold_mask))
+    if above_threshold_count > 0 and penalty_multiplier > 0.0 and safety_threshold > 0.0:
+        excess = risk[above_threshold_mask] - safety_threshold
+        penalty_factor = 1.0 + penalty_multiplier * excess / safety_threshold
+        risk[above_threshold_mask] *= penalty_factor
+
+    # --- Step 3: Handle CATZOC NaN values ------------------------------------
     survey_nan_mask = ~np.isfinite(survey)
     if survey_nan_mask.any():
         fill_value = 0.0 if survey_nodata_as == "unsurveyed" else float(CATZOC_MAX)
@@ -208,7 +220,7 @@ def build_composite_cost(
     # Clip survey values to valid range [0, 3] in case input is noisy.
     survey = np.clip(survey, 0.0, float(CATZOC_MAX))
 
-    # --- Step 3: Normalise risk -----------------------------------------------
+    # --- Step 4: Normalise risk -----------------------------------------------
     # Use only the finite (passable) cells for normalisation.
     finite_mask = np.isfinite(risk)
     risk_max = float(risk[finite_mask].max()) if finite_mask.any() else 1.0
@@ -216,7 +228,7 @@ def build_composite_cost(
         risk_max = 1.0  # Avoid division by zero on a zero-cost raster.
     norm_risk = risk / risk_max  # NaN cells stay NaN
 
-    # --- Step 4: Invert and normalise survey cost ----------------------------
+    # --- Step 5: Invert and normalise survey cost ----------------------------
     # survey_cost = 3 - survey  (0=Gap → cost=3, 3=Full → cost=0)
     # norm_survey_cost in [0, 1]: (3 - survey) / 3
     survey_cost = (CATZOC_MAX - survey) / float(CATZOC_MAX)
@@ -250,14 +262,14 @@ def build_composite_cost(
     # Apply the NaN mask from the risk layer so barrier cells stay NaN.
     survey_component[~np.isfinite(risk)] = np.nan
 
-    # --- Step 5: Composite cost -----------------------------------------------
+    # --- Step 6: Composite cost -----------------------------------------------
     composite = (1.0 - survey_weight) * norm_risk + survey_weight * survey_component
 
     # Propagate NaN from original barriers (already done via norm_risk NaN).
     # Restore originally_invalid cells that might have been overwritten.
     composite[originally_invalid] = np.nan
 
-    return composite, blocked_cells_count
+    return composite, above_threshold_count
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +327,7 @@ def survey_aware_least_cost_path(
     safety_threshold: float = 100.0,
     survey_weight: float = 0.3,
     survey_nodata_as: str = "unsurveyed",
+    penalty_multiplier: float = 10.0,
     curvature_factor: float = 0.0,
     max_turning_angle: float = 180.0,
     distance_factor: float = 0.0,
@@ -327,8 +340,10 @@ def survey_aware_least_cost_path(
 
     Extends ``cost_aware_least_cost_path`` with two additional objectives:
 
-    * **Safety constraint (hard)**: cells with risk > ``safety_threshold``
-      are treated as impassable.
+    * **Safety penalty (soft)**: cells with risk > ``safety_threshold``
+      receive a linearly scaled cost multiplier so that the path strongly
+      prefers safer alternatives while still being able to cross high-risk
+      areas when no other route exists.
     * **Survey-value objective (soft)**: the path is attracted to cells with
       low CATZOC coverage (Gap / Void of Soundings) so that data can be
       collected during transit.
@@ -352,7 +367,9 @@ def survey_aware_least_cost_path(
     end : tuple[int, int]
         ``(row, col)`` of the end cell (zero-based).
     safety_threshold : float, optional
-        Risk values strictly above this are masked to NaN.  Default 100.
+        Risk value above which a linear penalty is applied.  Cells are
+        *not* masked to NaN; the path avoids them via higher cost.
+        Default 100.
     survey_weight : float, optional
         Weight of the survey objective in the composite cost [0.0, 1.0].
         Default 0.3.
@@ -360,6 +377,13 @@ def survey_aware_least_cost_path(
         How NaN cells in ``survey_raster`` are handled.
         ``"unsurveyed"`` (default) treats them as CATZOC 0 (highest priority).
         ``"surveyed"`` treats them as CATZOC 3 (no survey value added).
+    penalty_multiplier : float, optional
+        Strength of the linear cost penalty for cells above
+        ``safety_threshold``.  The effective cost multiplier for a cell is::
+
+            1 + penalty_multiplier * (risk - threshold) / threshold
+
+        Default 10.0.  Set to 0.0 to disable the penalty.
     curvature_factor : float, optional
         Soft penalty for sharp turns (0.0 – 1.0). Default 0.0.
     max_turning_angle : float, optional
@@ -387,14 +411,15 @@ def survey_aware_least_cost_path(
             Fraction of grid-path cells with CATZOC <= 1 (Gap or Minimal).
             0.0 = entirely through well-surveyed water;
             1.0 = entirely through unsurveyed / minimally surveyed water.
-        ``blocked_cells_count`` : int
-            Number of cells masked by ``safety_threshold``.
+        ``above_threshold_count`` : int
+            Number of cells whose risk exceeds ``safety_threshold``
+            (these cells are penalised but still passable).
         ``composite_cost_raster`` : numpy.ndarray
             The composite cost array actually used by the Dijkstra search.
     """
     _validate_survey_params(
         risk_raster, survey_raster, start, end,
-        safety_threshold, survey_weight, survey_nodata_as,
+        safety_threshold, survey_weight, survey_nodata_as, penalty_multiplier,
     )
 
     if progress_callback:
@@ -406,14 +431,15 @@ def survey_aware_least_cost_path(
         )
 
     # --- Preprocessing --------------------------------------------------------
-    composite, blocked_cells_count = build_composite_cost(
-        risk_raster, survey_raster, safety_threshold, survey_weight, survey_nodata_as,
+    composite, above_threshold_count = build_composite_cost(
+        risk_raster, survey_raster, safety_threshold, survey_weight,
+        survey_nodata_as, penalty_multiplier,
     )
 
     if progress_callback:
         progress_callback(
             f"[Survey-Aware] Composite cost raster built. "
-            f"Cells blocked by safety threshold: {blocked_cells_count}"
+            f"Cells above safety threshold (penalised): {above_threshold_count}"
         )
 
     # --- Delegate to the core algorithm --------------------------------------
@@ -435,7 +461,7 @@ def survey_aware_least_cost_path(
 
     result["survey_coverage_profile"] = profile
     result["survey_score"] = survey_score
-    result["blocked_cells_count"] = blocked_cells_count
+    result["above_threshold_count"] = above_threshold_count
     result["composite_cost_raster"] = composite
 
     if progress_callback:
