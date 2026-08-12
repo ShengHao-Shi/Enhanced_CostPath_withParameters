@@ -1,0 +1,8 @@
+﻿Traceback (most recent call last):
+﻿  File "<string>", line 731, in execute
+﻿  File "<string>", line 536, in _read_survey_inputs
+﻿  File "C:\Program Files\ArcGIS\Pro\Resources\ArcPy\arcpy\__init__.py", line 2478, in RasterToNumPyArray
+﻿    return _RasterToNumPyArray(*args, **kwargs)
+﻿           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+﻿RuntimeError: The pixel block exceeds the maximum size allowed.
+Failed to execute (SurveyAwareNumbaLCPTool).
