@@ -148,6 +148,83 @@ def _xy_to_rowcol(xy, extent, cell_x, cell_y, shape):
     return (row, col)
 
 
+def _raster_to_array_clipped(raster, start_xy, end_xy, is_integer, sentinel):
+    """Read only the region of a raster that surrounds start and end points.
+
+    Avoids the ArcPy 'pixel block exceeds maximum size' error for large rasters
+    by requesting only the sub-region needed for routing.  A buffer of at least
+    25 % of the straight-line distance between the two points (minimum 50 cells)
+    is added so that the algorithm has room to route around obstacles.
+
+    Parameters
+    ----------
+    raster : arcpy.Raster
+        Source raster (already opened).
+    start_xy, end_xy : (float, float)
+        Map coordinates of the start and end points.
+    is_integer : bool
+        Whether the raster stores integer values.
+    sentinel : int or float
+        Value used as a stand-in for NoData when *is_integer* is True.
+        For floating-point rasters pass ``np.nan`` (it is not used).
+
+    Returns
+    -------
+    arr : numpy.ndarray  (float32)
+        Clipped raster values; NoData cells are represented as ``np.nan``.
+    clipped_extent : arcpy.Extent
+        The geographic extent of the returned array (grid-snapped).
+    """
+    cell_x = raster.meanCellWidth
+    cell_y = raster.meanCellHeight
+    full_ext = raster.extent
+
+    # Bounding box of the two points plus a generous buffer.
+    dx = abs(end_xy[0] - start_xy[0])
+    dy = abs(end_xy[1] - start_xy[1])
+    diag = max((dx ** 2 + dy ** 2) ** 0.5, cell_x * 50)
+    buf = max(diag * 0.25, cell_x * 50)
+
+    raw_xmin = min(start_xy[0], end_xy[0]) - buf
+    raw_xmax = max(start_xy[0], end_xy[0]) + buf
+    raw_ymin = min(start_xy[1], end_xy[1]) - buf
+    raw_ymax = max(start_xy[1], end_xy[1]) + buf
+
+    # Clamp to the full raster extent.
+    clip_xmin = max(raw_xmin, full_ext.XMin)
+    clip_xmax = min(raw_xmax, full_ext.XMax)
+    clip_ymin = max(raw_ymin, full_ext.YMin)
+    clip_ymax = min(raw_ymax, full_ext.YMax)
+
+    # Snap to the raster grid so llCorner aligns with a cell boundary.
+    col_offset = int((clip_xmin - full_ext.XMin) / cell_x)
+    row_offset = int((full_ext.YMax - clip_ymax) / cell_y)
+    ncols = max(1, int((clip_xmax - clip_xmin) / cell_x))
+    nrows = max(1, int((clip_ymax - clip_ymin) / cell_y))
+
+    snap_xmin = full_ext.XMin + col_offset * cell_x
+    snap_ymax = full_ext.YMax - row_offset * cell_y
+    snap_xmax = snap_xmin + ncols * cell_x
+    snap_ymin = snap_ymax - nrows * cell_y
+
+    ll_corner = arcpy.Point(snap_xmin, snap_ymin)
+
+    if is_integer:
+        arr = arcpy.RasterToNumPyArray(
+            raster, ll_corner, ncols, nrows, nodata_to_value=sentinel
+        )
+        arr = arr.astype(np.float32)
+        arr[arr == sentinel] = np.nan
+    else:
+        arr = arcpy.RasterToNumPyArray(
+            raster, ll_corner, ncols, nrows, nodata_to_value=np.nan
+        )
+        arr = arr.astype(np.float32)
+
+    clipped_extent = arcpy.Extent(snap_xmin, snap_ymin, snap_xmax, snap_ymax)
+    return arr, clipped_extent
+
+
 def _write_polyline(path, extent, cell_x, cell_y, sr, output_fc):
     """Write the path as a single polyline feature class."""
     points = []
@@ -294,29 +371,30 @@ def _read_inputs(parameters):
     output_fc = parameters[8].valueAsText
 
     raster = arcpy.Raster(cost_raster_path)
+    cell_x = raster.meanCellWidth
+    cell_y = raster.meanCellHeight
+    sr = raster.spatialReference
+
+    # Read the start/end points before loading the raster array so that only
+    # the sub-region around the route is read (avoids the ArcPy pixel-block
+    # size limit on very large rasters).
+    start_pt = _fc_to_point(start_fc)
+    end_pt = _fc_to_point(end_fc)
+
     nodata_val = raster.noDataValue
     if raster.isInteger:
         # Integer rasters do not support NaN as nodata_to_value;
         # use the raster's own nodata value as sentinel (or a fallback),
         # convert to float, then replace with NaN.
         sentinel = int(nodata_val) if nodata_val is not None else -9999
-        cost_array = arcpy.RasterToNumPyArray(
-            raster, nodata_to_value=sentinel
+        cost_array, extent = _raster_to_array_clipped(
+            raster, start_pt, end_pt, is_integer=True, sentinel=sentinel
         )
-        cost_array = cost_array.astype(np.float32)
-        cost_array[cost_array == sentinel] = np.nan
     else:
-        cost_array = arcpy.RasterToNumPyArray(
-            raster, nodata_to_value=np.nan
+        cost_array, extent = _raster_to_array_clipped(
+            raster, start_pt, end_pt, is_integer=False, sentinel=np.nan
         )
-        cost_array = cost_array.astype(np.float32)
-    cell_x = raster.meanCellWidth
-    cell_y = raster.meanCellHeight
-    extent = raster.extent
-    sr = raster.spatialReference
 
-    start_pt = _fc_to_point(start_fc)
-    end_pt = _fc_to_point(end_fc)
     start_rc = _xy_to_rowcol(start_pt, extent, cell_x, cell_y,
                               cost_array.shape)
     end_rc = _xy_to_rowcol(end_pt, extent, cell_x, cell_y,
@@ -528,41 +606,42 @@ def _read_survey_inputs(parameters):
     )
     output_fc = parameters[12].valueAsText
 
+    # Read the start/end points before loading raster arrays so that only the
+    # sub-region around the route is read (avoids the ArcPy pixel-block size
+    # limit on very large rasters).
+    start_pt = _fc_to_point(start_fc)
+    end_pt = _fc_to_point(end_fc)
+
     # Load risk raster.
     risk_raster = arcpy.Raster(cost_raster_path)
     nodata_val = risk_raster.noDataValue
     if risk_raster.isInteger:
         sentinel = int(nodata_val) if nodata_val is not None else -9999
-        risk_array = arcpy.RasterToNumPyArray(risk_raster, nodata_to_value=sentinel)
-        risk_array = risk_array.astype(np.float32)
-        risk_array[risk_array == sentinel] = np.nan
+        risk_array, extent = _raster_to_array_clipped(
+            risk_raster, start_pt, end_pt, is_integer=True, sentinel=sentinel
+        )
     else:
-        risk_array = arcpy.RasterToNumPyArray(risk_raster, nodata_to_value=np.nan)
-        risk_array = risk_array.astype(np.float32)
+        risk_array, extent = _raster_to_array_clipped(
+            risk_raster, start_pt, end_pt, is_integer=False, sentinel=np.nan
+        )
 
     cell_x = risk_raster.meanCellWidth
     cell_y = risk_raster.meanCellHeight
-    extent = risk_raster.extent
     sr = risk_raster.spatialReference
 
-    # Load survey (CATZOC) raster.
+    # Load survey (CATZOC) raster clipped to the same bounding box.
     survey_raster_obj = arcpy.Raster(survey_raster_path)
     survey_nodata = survey_raster_obj.noDataValue
     if survey_raster_obj.isInteger:
         sentinel_s = int(survey_nodata) if survey_nodata is not None else -9999
-        survey_array = arcpy.RasterToNumPyArray(
-            survey_raster_obj, nodata_to_value=sentinel_s
+        survey_array, _ = _raster_to_array_clipped(
+            survey_raster_obj, start_pt, end_pt, is_integer=True, sentinel=sentinel_s
         )
-        survey_array = survey_array.astype(np.float32)
-        survey_array[survey_array == sentinel_s] = np.nan
     else:
-        survey_array = arcpy.RasterToNumPyArray(
-            survey_raster_obj, nodata_to_value=np.nan
+        survey_array, _ = _raster_to_array_clipped(
+            survey_raster_obj, start_pt, end_pt, is_integer=False, sentinel=np.nan
         )
-        survey_array = survey_array.astype(np.float32)
 
-    start_pt = _fc_to_point(start_fc)
-    end_pt = _fc_to_point(end_fc)
     start_rc = _xy_to_rowcol(start_pt, extent, cell_x, cell_y, risk_array.shape)
     end_rc = _xy_to_rowcol(end_pt, extent, cell_x, cell_y, risk_array.shape)
 
