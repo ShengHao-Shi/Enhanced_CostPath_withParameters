@@ -2,7 +2,7 @@
 ArcGIS Python Toolbox – Cost-Aware LCP with Progress Reporting
 ===============================================================
 
-This ``.pyt`` file provides **two** geoprocessing tools that report
+This ``.pyt`` file provides **four** geoprocessing tools that report
 step-by-step progress in the ArcGIS Geoprocessing pane:
 
 1. **Cost-Aware LCP (Pure Python)** — uses
@@ -14,8 +14,16 @@ step-by-step progress in the ArcGIS Geoprocessing pane:
    execution on large rasters, with progress messages before/after
    each computational phase.
 
-Both tools accept the same parameters and produce the same output
-format.  The progress is shown via the ArcGIS step progressor bar
+3. **Survey-Aware LCP (Pure Python)** — extends the standard LCP for
+   hydrographic survey vessels.  Accepts a CATZOC coverage raster in
+   addition to the risk raster, applies a hard safety threshold, and
+   attracts the path towards under-surveyed areas.
+
+4. **Survey-Aware LCP (Numba Accelerated)** — same as (3) but uses
+   the Numba-accelerated Dijkstra search for large-raster performance.
+
+All tools accept the same base parameters and produce the same path
+output.  The progress is shown via the ArcGIS step progressor bar
 and as text lines in the *Geoprocessing → Messages* section.
 
 Usage
@@ -47,6 +55,7 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 import pure_python.cost_aware_straighten_lcp as _pure_python_mod  # noqa: E402
+import pure_python.survey_aware_lcp as _survey_pure_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +119,8 @@ class Toolbox:
         self.tools = [
             CostAwareLCPTool,
             CostAwareNumbaLCPTool,
+            SurveyAwareLCPTool,
+            SurveyAwareNumbaLCPTool,
         ]
 
 
@@ -413,9 +424,357 @@ class CostAwareLCPTool:
         return
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers for the survey-aware tools
+# ---------------------------------------------------------------------------
+
+
+def _make_survey_aware_params():
+    """Create the parameter list for both Survey-Aware LCP tools."""
+    # Start with all standard cost-aware parameters.
+    params = _make_cost_aware_params()
+
+    # Insert the survey raster as the second parameter (after the cost raster).
+    p_survey = arcpy.Parameter(
+        displayName="Survey Coverage Raster (CATZOC 0–3)",
+        name="survey_raster",
+        datatype="GPRasterLayer",
+        parameterType="Required",
+        direction="Input",
+    )
+    # Insert at index 1 (after cost_raster at index 0).
+    params.insert(1, p_survey)
+
+    # Safety threshold – optional, sits after survey raster.
+    p_threshold = arcpy.Parameter(
+        displayName="Safety Threshold (risk cells above this are impassable)",
+        name="safety_threshold",
+        datatype="GPDouble",
+        parameterType="Optional",
+        direction="Input",
+    )
+    p_threshold.value = 100.0
+    p_threshold.filter.type = "Range"
+    p_threshold.filter.list = [0.0, 1000.0]
+    params.insert(2, p_threshold)
+
+    # Survey weight.
+    p_weight = arcpy.Parameter(
+        displayName="Survey Weight (0.0 = risk only, 1.0 = survey only)",
+        name="survey_weight",
+        datatype="GPDouble",
+        parameterType="Optional",
+        direction="Input",
+    )
+    p_weight.value = 0.3
+    p_weight.filter.type = "Range"
+    p_weight.filter.list = [0.0, 1.0]
+    params.insert(3, p_weight)
+
+    # Survey NODATA handling.
+    p_nodata = arcpy.Parameter(
+        displayName="Survey NODATA Treatment",
+        name="survey_nodata_as",
+        datatype="GPString",
+        parameterType="Optional",
+        direction="Input",
+    )
+    p_nodata.filter.type = "ValueList"
+    p_nodata.filter.list = ["unsurveyed", "surveyed"]
+    p_nodata.value = "unsurveyed"
+    params.insert(4, p_nodata)
+
+    return params
+
+
+def _read_survey_inputs(parameters):
+    """Parse survey-aware tool parameters.
+
+    Parameter order (after insertion):
+      0  cost_raster
+      1  survey_raster        <- new
+      2  safety_threshold     <- new
+      3  survey_weight        <- new
+      4  survey_nodata_as     <- new
+      5  start_point
+      6  end_point
+      7  curvature_factor
+      8  max_turning_angle
+      9  distance_factor
+      10 straighten_factor
+      11 cost_tolerance
+      12 output_path
+    """
+    cost_raster_path = parameters[0].valueAsText
+    survey_raster_path = parameters[1].valueAsText
+    safety_threshold = float(parameters[2].value or 100.0)
+    survey_weight = float(parameters[3].value or 0.3)
+    survey_nodata_as = parameters[4].valueAsText or "unsurveyed"
+    start_fc = parameters[5].valueAsText
+    end_fc = parameters[6].valueAsText
+    curvature_factor = float(parameters[7].value or 0.0)
+    max_turning_angle_val = parameters[8].value
+    max_turning_angle = float(
+        max_turning_angle_val if max_turning_angle_val is not None else 180.0
+    )
+    distance_factor = float(parameters[9].value or 0.0)
+    straighten_factor_val = parameters[10].value
+    straighten_factor = float(
+        straighten_factor_val if straighten_factor_val is not None else 0.3
+    )
+    cost_tolerance_val = parameters[11].value
+    cost_tolerance = float(
+        cost_tolerance_val if cost_tolerance_val is not None else 1.05
+    )
+    output_fc = parameters[12].valueAsText
+
+    # Load risk raster.
+    risk_raster = arcpy.Raster(cost_raster_path)
+    nodata_val = risk_raster.noDataValue
+    if risk_raster.isInteger:
+        sentinel = int(nodata_val) if nodata_val is not None else -9999
+        risk_array = arcpy.RasterToNumPyArray(risk_raster, nodata_to_value=sentinel)
+        risk_array = risk_array.astype(np.float32)
+        risk_array[risk_array == sentinel] = np.nan
+    else:
+        risk_array = arcpy.RasterToNumPyArray(risk_raster, nodata_to_value=np.nan)
+        risk_array = risk_array.astype(np.float32)
+
+    cell_x = risk_raster.meanCellWidth
+    cell_y = risk_raster.meanCellHeight
+    extent = risk_raster.extent
+    sr = risk_raster.spatialReference
+
+    # Load survey (CATZOC) raster.
+    survey_raster_obj = arcpy.Raster(survey_raster_path)
+    survey_nodata = survey_raster_obj.noDataValue
+    if survey_raster_obj.isInteger:
+        sentinel_s = int(survey_nodata) if survey_nodata is not None else -9999
+        survey_array = arcpy.RasterToNumPyArray(
+            survey_raster_obj, nodata_to_value=sentinel_s
+        )
+        survey_array = survey_array.astype(np.float32)
+        survey_array[survey_array == sentinel_s] = np.nan
+    else:
+        survey_array = arcpy.RasterToNumPyArray(
+            survey_raster_obj, nodata_to_value=np.nan
+        )
+        survey_array = survey_array.astype(np.float32)
+
+    start_pt = _fc_to_point(start_fc)
+    end_pt = _fc_to_point(end_fc)
+    start_rc = _xy_to_rowcol(start_pt, extent, cell_x, cell_y, risk_array.shape)
+    end_rc = _xy_to_rowcol(end_pt, extent, cell_x, cell_y, risk_array.shape)
+
+    return {
+        "risk_array": risk_array,
+        "survey_array": survey_array,
+        "safety_threshold": safety_threshold,
+        "survey_weight": survey_weight,
+        "survey_nodata_as": survey_nodata_as,
+        "start_rc": start_rc,
+        "end_rc": end_rc,
+        "curvature_factor": curvature_factor,
+        "max_turning_angle": max_turning_angle,
+        "distance_factor": distance_factor,
+        "straighten_factor": straighten_factor,
+        "cost_tolerance": cost_tolerance,
+        "cell_size": (cell_y, cell_x),
+        "output_fc": output_fc,
+        "extent": extent,
+        "cell_x": cell_x,
+        "cell_y": cell_y,
+        "sr": sr,
+    }
+
+
+def _log_survey_result(messages, tag, result, elapsed):
+    """Log survey-aware result statistics to the messages pane."""
+    messages.addMessage(
+        f"[{tag}] Computation complete ({elapsed:.1f}s)\n"
+        f"  Path nodes: {len(result['path'])}\n"
+        f"  Straightened nodes: {len(result['straightened_path'])}\n"
+        f"  Smoothed nodes: {len(result['smoothed_path'])}\n"
+        f"  Total cost: {result['total_cost']:.2f}\n"
+        f"  Path length: {result['path_length']:.2f}\n"
+        f"  Survey score: {result['survey_score']:.2%} "
+        f"(gap/minimal coverage cells on path)\n"
+        f"  Cells blocked by safety threshold: {result['blocked_cells_count']}"
+    )
+
+
 # =========================================================================
-# Tool 2: Cost-Aware LCP (Numba Accelerated) with Progress
+# Tool 3: Survey-Aware LCP (Pure Python)
 # =========================================================================
+
+
+class SurveyAwareLCPTool:
+    """ArcGIS tool for survey-vessel LCP routing (pure Python)."""
+
+    def __init__(self):
+        self.label = "Survey-Aware LCP (Pure Python)"
+        self.description = (
+            "Plan routes for hydrographic survey vessels. "
+            "Applies a hard safety threshold on the risk raster and a soft "
+            "survey-value objective based on a CATZOC coverage raster, "
+            "attracting the path through under-surveyed areas. "
+            "Uses pure Python for maximum compatibility."
+        )
+        self.canRunInBackground = True
+
+    def getParameterInfo(self):  # noqa: N802
+        return _make_survey_aware_params()
+
+    def isLicensed(self):  # noqa: N802
+        return True
+
+    def updateParameters(self, parameters):  # noqa: N802
+        return
+
+    def updateMessages(self, parameters):  # noqa: N802
+        return
+
+    def execute(self, parameters, messages):  # noqa: N802
+        importlib.reload(_survey_pure_mod)
+
+        inputs = _read_survey_inputs(parameters)
+        progress_cb = _make_progress_callback(messages)
+
+        messages.addMessage(
+            f"[Survey-Aware / Pure Python] Starting computation...\n"
+            f"  Start: {inputs['start_rc']}, End: {inputs['end_rc']}\n"
+            f"  Raster size: {inputs['risk_array'].shape}\n"
+            f"  Safety threshold: {inputs['safety_threshold']}\n"
+            f"  Survey weight: {inputs['survey_weight']}"
+        )
+
+        t0 = time.time()
+
+        result = _survey_pure_mod.survey_aware_least_cost_path(
+            inputs["risk_array"],
+            inputs["survey_array"],
+            inputs["start_rc"],
+            inputs["end_rc"],
+            safety_threshold=inputs["safety_threshold"],
+            survey_weight=inputs["survey_weight"],
+            survey_nodata_as=inputs["survey_nodata_as"],
+            curvature_factor=inputs["curvature_factor"],
+            max_turning_angle=inputs["max_turning_angle"],
+            distance_factor=inputs["distance_factor"],
+            straighten_factor=inputs["straighten_factor"],
+            cost_tolerance=inputs["cost_tolerance"],
+            cell_size=inputs["cell_size"],
+            progress_callback=progress_cb,
+        )
+
+        elapsed = time.time() - t0
+        _log_survey_result(messages, "Survey-Aware / Pure Python", result, elapsed)
+
+        _write_polyline(
+            result["smoothed_path"],
+            inputs["extent"],
+            inputs["cell_x"],
+            inputs["cell_y"],
+            inputs["sr"],
+            inputs["output_fc"],
+        )
+        arcpy.SetProgressorPosition(100)
+        arcpy.ResetProgressor()
+        messages.addMessage(f"Output written to: {inputs['output_fc']}")
+
+    def postExecute(self, parameters):  # noqa: N802
+        return
+
+
+# =========================================================================
+# Tool 4: Survey-Aware LCP (Numba Accelerated)
+# =========================================================================
+
+
+class SurveyAwareNumbaLCPTool:
+    """ArcGIS tool for survey-vessel LCP routing (Numba accelerated)."""
+
+    def __init__(self):
+        self.label = "Survey-Aware LCP (Numba Accelerated)"
+        self.description = (
+            "Plan routes for hydrographic survey vessels using the "
+            "Numba JIT-compiled Dijkstra search (20–50x faster on large "
+            "rasters). Applies a hard safety threshold on the risk raster "
+            "and a soft survey-value objective based on a CATZOC coverage "
+            "raster. Note: the first call has ~6 s JIT compilation overhead."
+        )
+        self.canRunInBackground = True
+
+    def getParameterInfo(self):  # noqa: N802
+        return _make_survey_aware_params()
+
+    def isLicensed(self):  # noqa: N802
+        return True
+
+    def updateParameters(self, parameters):  # noqa: N802
+        return
+
+    def updateMessages(self, parameters):  # noqa: N802
+        return
+
+    def execute(self, parameters, messages):  # noqa: N802
+        try:
+            import numba_accelerated.survey_aware_lcp as _survey_numba_mod
+            importlib.reload(_survey_numba_mod)
+        except ImportError:
+            messages.addErrorMessage(
+                "Cannot import numba_accelerated module. "
+                "Please ensure numba is installed: pip install numba"
+            )
+            raise
+
+        inputs = _read_survey_inputs(parameters)
+        progress_cb = _make_progress_callback(messages)
+
+        messages.addMessage(
+            f"[Survey-Aware / Numba] Starting computation...\n"
+            f"  Start: {inputs['start_rc']}, End: {inputs['end_rc']}\n"
+            f"  Raster size: {inputs['risk_array'].shape}\n"
+            f"  Safety threshold: {inputs['safety_threshold']}\n"
+            f"  Survey weight: {inputs['survey_weight']}"
+        )
+
+        t0 = time.time()
+
+        result = _survey_numba_mod.survey_aware_least_cost_path(
+            inputs["risk_array"],
+            inputs["survey_array"],
+            inputs["start_rc"],
+            inputs["end_rc"],
+            safety_threshold=inputs["safety_threshold"],
+            survey_weight=inputs["survey_weight"],
+            survey_nodata_as=inputs["survey_nodata_as"],
+            curvature_factor=inputs["curvature_factor"],
+            max_turning_angle=inputs["max_turning_angle"],
+            distance_factor=inputs["distance_factor"],
+            straighten_factor=inputs["straighten_factor"],
+            cost_tolerance=inputs["cost_tolerance"],
+            cell_size=inputs["cell_size"],
+            progress_callback=progress_cb,
+        )
+
+        elapsed = time.time() - t0
+        _log_survey_result(messages, "Survey-Aware / Numba", result, elapsed)
+
+        _write_polyline(
+            result["smoothed_path"],
+            inputs["extent"],
+            inputs["cell_x"],
+            inputs["cell_y"],
+            inputs["sr"],
+            inputs["output_fc"],
+        )
+        arcpy.SetProgressorPosition(100)
+        arcpy.ResetProgressor()
+        messages.addMessage(f"Output written to: {inputs['output_fc']}")
+
+    def postExecute(self, parameters):  # noqa: N802
+        return
 
 class CostAwareNumbaLCPTool:
     """ArcGIS tool for Numba-accelerated cost-aware LCP with progress."""
