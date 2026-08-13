@@ -56,6 +56,8 @@ if _THIS_DIR not in sys.path:
 
 import pure_python.cost_aware_straighten_lcp as _pure_python_mod  # noqa: E402
 import pure_python.survey_aware_lcp as _survey_pure_mod  # noqa: E402
+import pure_python.astar_lcp as _astar_pure_mod  # noqa: E402
+import pure_python.astar_survey_aware_lcp as _astar_survey_pure_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +123,8 @@ class Toolbox:
             CostAwareNumbaLCPTool,
             SurveyAwareLCPTool,
             SurveyAwareNumbaLCPTool,
+            CostAwareAstarLCPTool,
+            SurveyAwareAstarLCPTool,
         ]
 
 
@@ -1066,6 +1070,182 @@ class CostAwareNumbaLCPTool:
             f"  Total cost: {result['total_cost']:.2f}\n"
             f"  Path length: {result['path_length']:.2f}"
         )
+
+        _write_polyline(
+            result["smoothed_path"],
+            inputs["extent"],
+            inputs["cell_x"],
+            inputs["cell_y"],
+            inputs["sr"],
+            inputs["output_fc"],
+        )
+        arcpy.SetProgressorPosition(100)
+        arcpy.ResetProgressor()
+        messages.addMessage(f"Output written to: {inputs['output_fc']}")
+
+    def postExecute(self, parameters):  # noqa: N802
+        return
+
+
+# =========================================================================
+# Tool 5: Cost-Aware LCP (A*, Pure Python)
+# =========================================================================
+
+class CostAwareAstarLCPTool:
+    """ArcGIS tool for cost-aware LCP using A* search (pure Python)."""
+
+    def __init__(self):
+        self.label = "Cost-Aware LCP (A*, Pure Python)"
+        self.description = (
+            "Compute a least cost path using A* (A-Star) search with "
+            "cost-aware straightening.  A* uses an admissible heuristic "
+            "(lower-bound estimated remaining cost) to focus the search "
+            "towards the goal, typically expanding far fewer nodes than "
+            "Dijkstra on open rasters.  "
+            "Reports step-by-step progress in the Messages pane.  "
+            "All parameters and outputs are identical to the Dijkstra "
+            "Pure Python tool."
+        )
+        self.canRunInBackground = True
+
+    def getParameterInfo(self):  # noqa: N802
+        return _make_cost_aware_params()
+
+    def isLicensed(self):  # noqa: N802
+        return True
+
+    def updateParameters(self, parameters):  # noqa: N802
+        return
+
+    def updateMessages(self, parameters):  # noqa: N802
+        return
+
+    def execute(self, parameters, messages):  # noqa: N802
+        importlib.reload(_astar_pure_mod)
+
+        inputs = _read_inputs(parameters)
+        progress_cb = _make_progress_callback(messages)
+
+        messages.addMessage(
+            f"[Cost-Aware A* / Pure Python] Starting computation...\n"
+            f"  Start: {inputs['start_rc']}, End: {inputs['end_rc']}\n"
+            f"  Raster size: {inputs['cost_array'].shape}"
+        )
+
+        t0 = time.time()
+
+        result = _astar_pure_mod.cost_aware_astar_least_cost_path(
+            inputs["cost_array"],
+            inputs["start_rc"],
+            inputs["end_rc"],
+            curvature_factor=inputs["curvature_factor"],
+            max_turning_angle=inputs["max_turning_angle"],
+            distance_factor=inputs["distance_factor"],
+            straighten_factor=inputs["straighten_factor"],
+            cost_tolerance=inputs["cost_tolerance"],
+            cell_size=inputs["cell_size"],
+            progress_callback=progress_cb,
+        )
+
+        elapsed = time.time() - t0
+
+        messages.addMessage(
+            f"[Cost-Aware A* / Pure Python] Computation complete ({elapsed:.1f}s)\n"
+            f"  Path nodes: {len(result['path'])}\n"
+            f"  Straightened nodes: {len(result['straightened_path'])}\n"
+            f"  Smoothed nodes: {len(result['smoothed_path'])}\n"
+            f"  Total cost: {result['total_cost']:.2f}\n"
+            f"  Path length: {result['path_length']:.2f}"
+        )
+
+        _write_polyline(
+            result["smoothed_path"],
+            inputs["extent"],
+            inputs["cell_x"],
+            inputs["cell_y"],
+            inputs["sr"],
+            inputs["output_fc"],
+        )
+        arcpy.SetProgressorPosition(100)
+        arcpy.ResetProgressor()
+        messages.addMessage(f"Output written to: {inputs['output_fc']}")
+
+    def postExecute(self, parameters):  # noqa: N802
+        return
+
+
+# =========================================================================
+# Tool 6: Survey-Aware LCP (A*, Pure Python)
+# =========================================================================
+
+class SurveyAwareAstarLCPTool:
+    """ArcGIS tool for survey-vessel LCP routing using A* search (pure Python)."""
+
+    def __init__(self):
+        self.label = "Survey-Aware LCP (A*, Pure Python)"
+        self.description = (
+            "Plan routes for hydrographic survey vessels using A* (A-Star) "
+            "search.  Applies a soft safety penalty on risk cells above a "
+            "threshold (controlled by the penalty multiplier) and a "
+            "survey-value objective based on a CATZOC coverage raster, "
+            "attracting the path through under-surveyed areas.  "
+            "A* focuses the search towards the goal, typically expanding "
+            "fewer nodes than Dijkstra on open rasters.  "
+            "All parameters and outputs are identical to the Dijkstra "
+            "Survey-Aware Pure Python tool."
+        )
+        self.canRunInBackground = True
+
+    def getParameterInfo(self):  # noqa: N802
+        return _make_survey_aware_params()
+
+    def isLicensed(self):  # noqa: N802
+        return True
+
+    def updateParameters(self, parameters):  # noqa: N802
+        return
+
+    def updateMessages(self, parameters):  # noqa: N802
+        return
+
+    def execute(self, parameters, messages):  # noqa: N802
+        importlib.reload(_astar_survey_pure_mod)
+
+        inputs = _read_survey_inputs(parameters)
+        progress_cb = _make_progress_callback(messages)
+
+        messages.addMessage(
+            f"[Survey-Aware A* / Pure Python] Starting computation...\n"
+            f"  Start: {inputs['start_rc']}, End: {inputs['end_rc']}\n"
+            f"  Raster size: {inputs['risk_array'].shape}\n"
+            f"  Safety threshold: {inputs['safety_threshold']}\n"
+            f"  Survey weight: {inputs['survey_weight']}"
+        )
+
+        t0 = time.time()
+
+        result = _astar_survey_pure_mod.survey_aware_astar_least_cost_path(
+            inputs["risk_array"],
+            inputs["survey_array"],
+            inputs["start_rc"],
+            inputs["end_rc"],
+            safety_threshold=inputs["safety_threshold"],
+            survey_weight=inputs["survey_weight"],
+            survey_nodata_as=inputs["survey_nodata_as"],
+            penalty_multiplier=inputs["penalty_multiplier"],
+            max_avoidance_level=inputs["max_avoidance_level"],
+            corridor_mask=inputs["corridor_mask"],
+            curvature_factor=inputs["curvature_factor"],
+            max_turning_angle=inputs["max_turning_angle"],
+            distance_factor=inputs["distance_factor"],
+            straighten_factor=inputs["straighten_factor"],
+            cost_tolerance=inputs["cost_tolerance"],
+            cell_size=inputs["cell_size"],
+            progress_callback=progress_cb,
+        )
+
+        elapsed = time.time() - t0
+        _log_survey_result(messages, "Survey-Aware A* / Pure Python", result, elapsed)
 
         _write_polyline(
             result["smoothed_path"],
