@@ -2,7 +2,7 @@
 ArcGIS Python Toolbox – Cost-Aware LCP with Progress Reporting
 ===============================================================
 
-This ``.pyt`` file provides **four** geoprocessing tools that report
+This ``.pyt`` file provides **six** geoprocessing tools that report
 step-by-step progress in the ArcGIS Geoprocessing pane:
 
 1. **Cost-Aware LCP (Pure Python)** — uses
@@ -21,6 +21,16 @@ step-by-step progress in the ArcGIS Geoprocessing pane:
 
 4. **Survey-Aware LCP (Numba Accelerated)** — same as (3) but uses
    the Numba-accelerated Dijkstra search for large-raster performance.
+
+5. **Cost-Aware LCP (A*, Pure Python)** — uses
+   ``pure_python.astar_lcp`` which replaces the Dijkstra search with
+   A* (A-Star).  A* uses an admissible heuristic to focus the search
+   towards the goal, typically expanding fewer nodes on open rasters.
+   Parameters and outputs are identical to tool (1).
+
+6. **Survey-Aware LCP (A*, Pure Python)** — survey-vessel extension
+   using the A* search from ``pure_python.astar_survey_aware_lcp``.
+   Parameters and outputs are identical to tool (3).
 
 All tools accept the same base parameters and produce the same path
 output.  The progress is shown via the ArcGIS step progressor bar

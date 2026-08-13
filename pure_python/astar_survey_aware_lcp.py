@@ -23,7 +23,6 @@ import numpy as np
 from pure_python.astar_lcp import cost_aware_astar_least_cost_path
 from pure_python.survey_aware_lcp import (
     CATZOC_MAX,
-    CATZOC_LABELS,
     _compute_survey_stats,
     _validate_survey_params,
     build_composite_cost,
