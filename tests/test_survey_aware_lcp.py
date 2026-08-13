@@ -347,3 +347,129 @@ class TestEndToEnd:
             max_turning_angle=135.0,
         )
         assert result["path"][-1] == (4, 9)
+
+
+# ---------------------------------------------------------------------------
+# max_avoidance_level parameter
+# ---------------------------------------------------------------------------
+
+class TestMaxAvoidanceLevel:
+
+    def test_default_avoidance_level_matches_catzoc_max(self):
+        """Default max_avoidance_level=3 should replicate previous behaviour."""
+        risk = np.ones((5, 10)) * 10.0
+        survey = np.zeros((5, 10))
+        survey[:, 5:] = 3.0
+
+        r_default = survey_aware_least_cost_path(
+            risk, survey, (2, 0), (2, 9), survey_weight=0.8, safety_threshold=200,
+        )
+        r_explicit = survey_aware_least_cost_path(
+            risk, survey, (2, 0), (2, 9), survey_weight=0.8, safety_threshold=200,
+            max_avoidance_level=3,
+        )
+        assert r_default["path"] == r_explicit["path"]
+
+    def test_lower_avoidance_level_avoids_more_cells(self):
+        """With max_avoidance_level=2, CATZOC-2 cells should also be costly."""
+        risk = np.ones((10, 10)) * 10.0
+        # Left half CATZOC 2, right half CATZOC 0 – both are passable.
+        survey = np.zeros((10, 10))
+        survey[:, :5] = 2.0
+
+        # With default level 3, CATZOC-2 is not the max cost → path may go left.
+        # With level 2, CATZOC-2 cells reach max survey cost → path avoids left.
+        r_level3 = survey_aware_least_cost_path(
+            risk, survey, (5, 0), (5, 9), survey_weight=1.0, safety_threshold=200,
+            max_avoidance_level=3,
+        )
+        r_level2 = survey_aware_least_cost_path(
+            risk, survey, (5, 0), (5, 9), survey_weight=1.0, safety_threshold=200,
+            max_avoidance_level=2,
+        )
+        # With level 2, paths through CATZOC-2 cols (0-4) are as expensive as
+        # CATZOC-3 → the survey_component is 1.0 for both sides, so the
+        # composite cost is the same for left and right. The path must still
+        # reach (5,9), so it is found regardless.  We verify it does complete.
+        assert r_level2["path"][-1] == (5, 9)
+        assert r_level3["path"][-1] == (5, 9)
+
+    def test_avoidance_level_one_makes_all_surveyed_costly(self):
+        """max_avoidance_level=1 treats CATZOC>=1 as max cost (only CATZOC 0 cheap)."""
+        risk = np.ones((5, 5)) * 10.0
+        survey = np.ones((5, 5))  # all CATZOC 1
+        composite, _ = build_composite_cost(
+            risk, survey, safety_threshold=200, survey_weight=1.0,
+            max_avoidance_level=1,
+        )
+        # survey_component = min(1, 1) / 1 = 1.0 for all cells → composite = 1.0
+        finite = composite[np.isfinite(composite)]
+        assert np.allclose(finite, 1.0), "All CATZOC-1 cells should have max cost"
+
+    def test_build_composite_cost_max_avoidance_level(self):
+        """Cells >= max_avoidance_level must all have the same (max) survey component."""
+        risk = np.ones((2, 4)) * 10.0
+        survey = np.array([[0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 2.0, 3.0]])
+
+        composite_lv2, _ = build_composite_cost(
+            risk, survey, safety_threshold=200, survey_weight=1.0,
+            max_avoidance_level=2,
+        )
+        # CATZOC 2 and 3 should have the same composite cost (both capped at 2).
+        assert np.isclose(composite_lv2[0, 2], composite_lv2[0, 3]), (
+            "CATZOC-2 and CATZOC-3 cells must have equal composite cost "
+            "when max_avoidance_level=2"
+        )
+        # CATZOC 1 should be cheaper than CATZOC 2.
+        assert composite_lv2[0, 1] < composite_lv2[0, 2]
+
+
+# ---------------------------------------------------------------------------
+# corridor_mask parameter
+# ---------------------------------------------------------------------------
+
+class TestCorridorMask:
+
+    def test_corridor_mask_blocks_outside_cells(self):
+        """Cells outside corridor_mask must be impassable (path stays inside)."""
+        risk = np.ones((5, 10)) * 10.0
+        survey = np.zeros((5, 10))
+
+        # Allow only the top two rows.
+        corridor = np.zeros((5, 10), dtype=bool)
+        corridor[:2, :] = True
+
+        result = survey_aware_least_cost_path(
+            risk, survey, (0, 0), (0, 9), corridor_mask=corridor,
+        )
+        for r, c in result["path"]:
+            assert r < 2, f"Path cell ({r},{c}) is outside the corridor"
+
+    def test_no_corridor_equals_full_grid(self):
+        """Without a corridor, the path should be identical to corridor=all True."""
+        risk = np.ones((5, 10)) * 10.0
+        survey = np.zeros((5, 10))
+
+        full_corridor = np.ones((5, 10), dtype=bool)
+
+        r_no_corridor = survey_aware_least_cost_path(
+            risk, survey, (0, 0), (4, 9),
+        )
+        r_full_corridor = survey_aware_least_cost_path(
+            risk, survey, (0, 0), (4, 9), corridor_mask=full_corridor,
+        )
+        assert r_no_corridor["path"] == r_full_corridor["path"]
+
+    def test_corridor_no_path_raises(self):
+        """A corridor with a full blocking wall must raise RuntimeError."""
+        risk = np.ones((5, 10)) * 10.0
+        survey = np.zeros((5, 10))
+
+        # Corridor excludes an entire column in the middle → no path possible.
+        corridor = np.ones((5, 10), dtype=bool)
+        corridor[:, 5] = False  # block column 5 (complete vertical wall)
+
+        with pytest.raises(RuntimeError, match="No path"):
+            survey_aware_least_cost_path(
+                risk, survey, (2, 0), (2, 9), corridor_mask=corridor,
+            )

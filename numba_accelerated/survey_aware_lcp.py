@@ -41,6 +41,8 @@ def survey_aware_least_cost_path(
     survey_weight: float = 0.3,
     survey_nodata_as: str = "unsurveyed",
     penalty_multiplier: float = 10.0,
+    max_avoidance_level: int = CATZOC_MAX,
+    corridor_mask: Optional[np.ndarray] = None,
     curvature_factor: float = 0.0,
     max_turning_angle: float = 180.0,
     distance_factor: float = 0.0,
@@ -114,18 +116,28 @@ def survey_aware_least_cost_path(
         safety_threshold, survey_weight, survey_nodata_as, penalty_multiplier,
     )
 
+    # --- Apply corridor mask (cells outside → impassable) ---------------------
+    if corridor_mask is not None:
+        risk_raster = np.array(risk_raster, dtype=np.float64)
+        risk_raster[~corridor_mask] = np.nan
+
     if progress_callback:
         rows, cols = risk_raster.shape
+        corridor_info = (
+            f", corridor: {int(np.sum(corridor_mask))} passable cells"
+            if corridor_mask is not None else ""
+        )
         progress_callback(
             f"[Survey-Aware / Numba] Parameters validated. "
             f"Raster: {rows}×{cols}, threshold: {safety_threshold}, "
             f"survey_weight: {survey_weight}"
+            f"{corridor_info}"
         )
 
     # --- Preprocessing (pure NumPy – no Numba needed) -------------------------
     composite, above_threshold_count = build_composite_cost(
         risk_raster, survey_raster, safety_threshold, survey_weight,
-        survey_nodata_as, penalty_multiplier,
+        survey_nodata_as, penalty_multiplier, max_avoidance_level,
     )
 
     if progress_callback:

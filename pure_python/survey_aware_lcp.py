@@ -156,6 +156,7 @@ def build_composite_cost(
     survey_weight: float,
     survey_nodata_as: str = "unsurveyed",
     penalty_multiplier: float = 10.0,
+    max_avoidance_level: int = CATZOC_MAX,
 ) -> Tuple[np.ndarray, int]:
     """Build the composite cost raster used as input to the LCP algorithm.
 
@@ -186,6 +187,19 @@ def build_composite_cost(
         A value of 10.0 (default) means a cell whose risk is exactly
         2× the threshold receives 11× the baseline composite cost.
         Set to 0.0 to disable the penalty entirely.
+    max_avoidance_level : int
+        Maximum CATZOC level at which the survey objective starts penalising
+        cells.  Cells with CATZOC >= ``max_avoidance_level`` are treated as
+        fully surveyed (maximum survey component cost).  Cells below this level
+        are penalised proportionally.
+
+        * 3 (default) – avoid Class A only (CATZOC 3).
+        * 2 – avoid Class A and Class B (CATZOC 2–3).
+        * 1 – avoid Class A, B, and C (CATZOC 1–3).
+
+        The effective survey component formula is::
+
+            survey_component = min(survey, max_avoidance_level) / max_avoidance_level
 
     Returns
     -------
@@ -219,6 +233,11 @@ def build_composite_cost(
 
     # Clip survey values to valid range [0, 3] in case input is noisy.
     survey = np.clip(survey, 0.0, float(CATZOC_MAX))
+
+    # Apply max_avoidance_level: cells with CATZOC >= max_avoidance_level are
+    # clamped to max_avoidance_level so they all receive maximum survey cost.
+    effective_max = max(1, int(max_avoidance_level))
+    survey = np.minimum(survey, float(effective_max))
 
     # --- Step 4: Normalise risk -----------------------------------------------
     # Use only the finite (passable) cells for normalisation.
@@ -257,8 +276,8 @@ def build_composite_cost(
     #   composite = (1 - w) * norm_risk + w * (1 - norm_survey_cost)
     # where norm_survey_cost = (3 - survey) / 3.
     # Substituting: (1 - norm_survey_cost) = 1 - (3-survey)/3 = survey/3
-    # So this equals survey / CATZOC_MAX — confirmed correct direction.
-    survey_component = survey / float(CATZOC_MAX)
+    # So this equals survey / effective_max — confirmed correct direction.
+    survey_component = survey / float(effective_max)
     # Apply the NaN mask from the risk layer so barrier cells stay NaN.
     survey_component[~np.isfinite(risk)] = np.nan
 
@@ -328,6 +347,8 @@ def survey_aware_least_cost_path(
     survey_weight: float = 0.3,
     survey_nodata_as: str = "unsurveyed",
     penalty_multiplier: float = 10.0,
+    max_avoidance_level: int = CATZOC_MAX,
+    corridor_mask: Optional[np.ndarray] = None,
     curvature_factor: float = 0.0,
     max_turning_angle: float = 180.0,
     distance_factor: float = 0.0,
@@ -358,9 +379,9 @@ def survey_aware_least_cost_path(
         ``risk_raster``.  Values must be 0–3:
 
         * 0 – Gap / Void of Soundings  (highest survey priority)
-        * 1 – Minimal Coverage
-        * 2 – Moderate Coverage
-        * 3 – Full Bottom Coverage     (lowest survey priority)
+        * 1 – Minimal Coverage / Class C
+        * 2 – Moderate Coverage / Class B
+        * 3 – Full Bottom Coverage / Class A (lowest survey priority)
 
     start : tuple[int, int]
         ``(row, col)`` of the start cell (zero-based).
@@ -384,6 +405,17 @@ def survey_aware_least_cost_path(
             1 + penalty_multiplier * (risk - threshold) / threshold
 
         Default 10.0.  Set to 0.0 to disable the penalty.
+    max_avoidance_level : int, optional
+        Maximum CATZOC level at which the survey objective starts penalising
+        cells.  Cells with CATZOC >= ``max_avoidance_level`` are treated as
+        fully surveyed (maximum survey component cost).  Default 3 (avoid
+        Class A only).  Set to 2 to also avoid Class B; set to 1 to avoid
+        Class C, B, and A.
+    corridor_mask : numpy.ndarray of bool, optional
+        2-D boolean array, same shape as ``risk_raster``.  Where
+        ``corridor_mask`` is ``False`` the cell is treated as impassable
+        (NaN) so that the path is constrained to stay inside the corridor.
+        ``None`` (default) means no corridor constraint.
     curvature_factor : float, optional
         Soft penalty for sharp turns (0.0 – 1.0). Default 0.0.
     max_turning_angle : float, optional
@@ -422,18 +454,28 @@ def survey_aware_least_cost_path(
         safety_threshold, survey_weight, survey_nodata_as, penalty_multiplier,
     )
 
+    # --- Apply corridor mask (cells outside → impassable) ---------------------
+    if corridor_mask is not None:
+        risk_raster = np.array(risk_raster, dtype=np.float64)
+        risk_raster[~corridor_mask] = np.nan
+
     if progress_callback:
         rows, cols = risk_raster.shape
+        corridor_info = (
+            f", corridor: {int(np.sum(corridor_mask))} passable cells"
+            if corridor_mask is not None else ""
+        )
         progress_callback(
             f"[Survey-Aware] Parameters validated. "
             f"Raster: {rows}×{cols}, threshold: {safety_threshold}, "
             f"survey_weight: {survey_weight}"
+            f"{corridor_info}"
         )
 
     # --- Preprocessing --------------------------------------------------------
     composite, above_threshold_count = build_composite_cost(
         risk_raster, survey_raster, safety_threshold, survey_weight,
-        survey_nodata_as, penalty_multiplier,
+        survey_nodata_as, penalty_multiplier, max_avoidance_level,
     )
 
     if progress_callback:

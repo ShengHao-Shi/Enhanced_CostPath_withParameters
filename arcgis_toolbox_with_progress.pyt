@@ -507,6 +507,78 @@ class CostAwareLCPTool:
 # ---------------------------------------------------------------------------
 
 
+def _polygon_to_mask(corridor_fc, extent, cell_x, cell_y, shape):
+    """Convert a corridor polygon feature class to a boolean raster mask.
+
+    Uses a vectorized ray-casting algorithm to avoid per-cell arcpy geometry
+    calls.  Returns a boolean array where ``True`` means the cell centre
+    falls inside (or on the boundary of) the corridor polygon.
+
+    Parameters
+    ----------
+    corridor_fc : str
+        Path to the polygon feature class that defines the corridor.
+    extent : arcpy.Extent
+        Geographic extent of the clipped risk raster.
+    cell_x, cell_y : float
+        Cell width and height in map units.
+    shape : tuple[int, int]
+        ``(rows, cols)`` of the target raster.
+
+    Returns
+    -------
+    numpy.ndarray of bool or None
+        Boolean mask aligned to ``extent``, or ``None`` if the feature class
+        contains no features.
+    """
+    rows, cols = shape
+
+    geoms = []
+    with arcpy.da.SearchCursor(corridor_fc, ["SHAPE@"]) as cur:
+        for row in cur:
+            geoms.append(row[0])
+
+    if not geoms:
+        return None
+
+    # Pre-compute all cell-centre coordinates as flat arrays (vectorised).
+    xs = extent.XMin + (np.arange(cols) + 0.5) * cell_x
+    ys = extent.YMax - (np.arange(rows) + 0.5) * cell_y
+    xx, yy = np.meshgrid(xs, ys)
+    px = xx.ravel()
+    py = yy.ravel()
+
+    inside = np.zeros(len(px), dtype=bool)
+
+    for geom in geoms:
+        for part_idx in range(geom.partCount):
+            part = geom.getPart(part_idx)
+            # getPart() returns an Array of Point objects; None separates rings.
+            vertices = [(pt.X, pt.Y) for pt in part if pt is not None]
+            if len(vertices) < 3:
+                continue
+
+            vx = np.array([v[0] for v in vertices], dtype=np.float64)
+            vy = np.array([v[1] for v in vertices], dtype=np.float64)
+            n = len(vx)
+
+            # Vectorised ray-casting: count edge crossings for each cell centre.
+            for i in range(n):
+                xi, yi = vx[i], vy[i]
+                xj, yj = vx[(i + 1) % n], vy[(i + 1) % n]
+
+                cond = (yi > py) != (yj > py)
+                denom = yj - yi
+                x_cross = np.where(
+                    np.abs(denom) > 1e-15,
+                    (xj - xi) * (py - yi) / denom + xi,
+                    np.inf,
+                )
+                inside ^= cond & (px < x_cross)
+
+    return inside.reshape(rows, cols)
+
+
 def _make_survey_aware_params():
     """Create the parameter list for both Survey-Aware LCP tools."""
     # Start with all standard cost-aware parameters.
@@ -575,6 +647,30 @@ def _make_survey_aware_params():
     p_penalty.filter.list = [0.0, 1000.0]
     params.insert(5, p_penalty)
 
+    # Maximum avoidance level – controls which CATZOC classes are avoided.
+    p_avoidance = arcpy.Parameter(
+        displayName="Maximum Avoidance Level (1–3; cells at or above this CATZOC level are avoided)",
+        name="max_avoidance_level",
+        datatype="GPLong",
+        parameterType="Optional",
+        direction="Input",
+    )
+    p_avoidance.value = 3
+    p_avoidance.filter.type = "Range"
+    p_avoidance.filter.list = [1, 3]
+    params.insert(6, p_avoidance)
+
+    # Corridor polygon – optional spatial boundary for the path search.
+    p_corridor = arcpy.Parameter(
+        displayName="Corridor (optional polygon – path is constrained inside this area)",
+        name="corridor",
+        datatype="GPFeatureLayer",
+        parameterType="Optional",
+        direction="Input",
+    )
+    p_corridor.filter.list = ["Polygon"]
+    params.insert(7, p_corridor)
+
     return params
 
 
@@ -583,19 +679,21 @@ def _read_survey_inputs(parameters):
 
     Parameter order (after insertion):
       0  cost_raster
-      1  survey_raster        <- new
-      2  safety_threshold     <- new
-      3  survey_weight        <- new
-      4  survey_nodata_as     <- new
-      5  penalty_multiplier   <- new
-      6  start_point
-      7  end_point
-      8  curvature_factor
-      9  max_turning_angle
-      10 distance_factor
-      11 straighten_factor
-      12 cost_tolerance
-      13 output_path
+      1  survey_raster
+      2  safety_threshold
+      3  survey_weight
+      4  survey_nodata_as
+      5  penalty_multiplier
+      6  max_avoidance_level  <- new
+      7  corridor             <- new (optional polygon)
+      8  start_point
+      9  end_point
+      10 curvature_factor
+      11 max_turning_angle
+      12 distance_factor
+      13 straighten_factor
+      14 cost_tolerance
+      15 output_path
     """
     cost_raster_path = parameters[0].valueAsText
     survey_raster_path = parameters[1].valueAsText
@@ -606,23 +704,28 @@ def _read_survey_inputs(parameters):
     penalty_multiplier = float(
         penalty_multiplier_val if penalty_multiplier_val is not None else 10.0
     )
-    start_fc = parameters[6].valueAsText
-    end_fc = parameters[7].valueAsText
-    curvature_factor = float(parameters[8].value or 0.0)
-    max_turning_angle_val = parameters[9].value
+    max_avoidance_level_val = parameters[6].value
+    max_avoidance_level = int(
+        max_avoidance_level_val if max_avoidance_level_val is not None else 3
+    )
+    corridor_fc = parameters[7].valueAsText  # may be None
+    start_fc = parameters[8].valueAsText
+    end_fc = parameters[9].valueAsText
+    curvature_factor = float(parameters[10].value or 0.0)
+    max_turning_angle_val = parameters[11].value
     max_turning_angle = float(
         max_turning_angle_val if max_turning_angle_val is not None else 180.0
     )
-    distance_factor = float(parameters[10].value or 0.0)
-    straighten_factor_val = parameters[11].value
+    distance_factor = float(parameters[12].value or 0.0)
+    straighten_factor_val = parameters[13].value
     straighten_factor = float(
         straighten_factor_val if straighten_factor_val is not None else 0.3
     )
-    cost_tolerance_val = parameters[12].value
+    cost_tolerance_val = parameters[14].value
     cost_tolerance = float(
         cost_tolerance_val if cost_tolerance_val is not None else 1.05
     )
-    output_fc = parameters[13].valueAsText
+    output_fc = parameters[15].valueAsText
 
     # Read the start/end points before loading raster arrays so that only the
     # sub-region around the route is read (avoids the ArcPy pixel-block size
@@ -663,6 +766,13 @@ def _read_survey_inputs(parameters):
     start_rc = _xy_to_rowcol(start_pt, extent, cell_x, cell_y, risk_array.shape)
     end_rc = _xy_to_rowcol(end_pt, extent, cell_x, cell_y, risk_array.shape)
 
+    # Build corridor mask if a polygon was provided.
+    corridor_mask = None
+    if corridor_fc:
+        corridor_mask = _polygon_to_mask(
+            corridor_fc, extent, cell_x, cell_y, risk_array.shape
+        )
+
     return {
         "risk_array": risk_array,
         "survey_array": survey_array,
@@ -670,6 +780,8 @@ def _read_survey_inputs(parameters):
         "survey_weight": survey_weight,
         "survey_nodata_as": survey_nodata_as,
         "penalty_multiplier": penalty_multiplier,
+        "max_avoidance_level": max_avoidance_level,
+        "corridor_mask": corridor_mask,
         "start_rc": start_rc,
         "end_rc": end_rc,
         "curvature_factor": curvature_factor,
@@ -758,6 +870,8 @@ class SurveyAwareLCPTool:
             survey_weight=inputs["survey_weight"],
             survey_nodata_as=inputs["survey_nodata_as"],
             penalty_multiplier=inputs["penalty_multiplier"],
+            max_avoidance_level=inputs["max_avoidance_level"],
+            corridor_mask=inputs["corridor_mask"],
             curvature_factor=inputs["curvature_factor"],
             max_turning_angle=inputs["max_turning_angle"],
             distance_factor=inputs["distance_factor"],
@@ -851,6 +965,8 @@ class SurveyAwareNumbaLCPTool:
             survey_weight=inputs["survey_weight"],
             survey_nodata_as=inputs["survey_nodata_as"],
             penalty_multiplier=inputs["penalty_multiplier"],
+            max_avoidance_level=inputs["max_avoidance_level"],
+            corridor_mask=inputs["corridor_mask"],
             curvature_factor=inputs["curvature_factor"],
             max_turning_angle=inputs["max_turning_angle"],
             distance_factor=inputs["distance_factor"],
