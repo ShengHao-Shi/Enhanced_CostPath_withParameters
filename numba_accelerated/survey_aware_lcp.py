@@ -82,6 +82,16 @@ def survey_aware_least_cost_path(
     penalty_multiplier : float, optional
         Strength of the linear cost penalty for cells above
         ``safety_threshold``.  Default 10.0.  Set to 0.0 to disable.
+    max_avoidance_level : int, optional
+        Maximum CATZOC level at which the survey objective penalises cells.
+        Cells with CATZOC >= ``max_avoidance_level`` receive the maximum
+        survey component cost.  Default 3 (avoid Class A only).  Set to 2
+        to also avoid Class B; set to 1 to avoid Class C, B, and A.
+    corridor_mask : numpy.ndarray of bool, optional
+        2-D boolean array, same shape as ``risk_raster``.  Where ``False``
+        the cell is treated as impassable (NaN) so that the path is
+        constrained to stay inside the corridor.  ``None`` (default) means
+        no corridor constraint.
     curvature_factor : float, optional
         Soft turn penalty (0.0–1.0). Default 0.0.
     max_turning_angle : float, optional

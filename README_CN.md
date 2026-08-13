@@ -460,4 +460,6 @@ print(f"Above threshold (penalised): {result['above_threshold_count']} cells")
 3. **Survey Weight** — 测绘权重滑块 0.0–1.0（默认 0.3）
 4. **Survey NODATA Treatment** — 空值处理（`unsurveyed` / `surveyed`）
 5. **Safety Penalty Multiplier** — 惩罚强度（默认 10.0）；值越大对超阈值区域的绕避越强烈
+6. **Maximum Avoidance Level** — 最大回避等级 1–3（默认 3，即仅回避 Class A）；调低至 2 则同时回避 Class A 和 B，调至 1 则回避全部有测绘记录的区域
+7. **Corridor** — 可选多边形图层；路径将被限制在此多边形范围内，范围外的格元视为不可通行
 

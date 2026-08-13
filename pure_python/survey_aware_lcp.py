@@ -213,6 +213,13 @@ def build_composite_cost(
     risk = np.array(risk_raster, dtype=np.float64)
     survey = np.array(survey_raster, dtype=np.float64)
 
+    # Validate max_avoidance_level.
+    if not (1 <= int(max_avoidance_level) <= CATZOC_MAX):
+        raise ValueError(
+            f"max_avoidance_level must be between 1 and {CATZOC_MAX}, "
+            f"got {max_avoidance_level}"
+        )
+
     # --- Step 1: Identify cells that are intrinsically invalid ----------------
     # Only NaN/Inf cells are true hard barriers; threshold excess is soft.
     originally_invalid = ~np.isfinite(risk)
@@ -247,36 +254,10 @@ def build_composite_cost(
         risk_max = 1.0  # Avoid division by zero on a zero-cost raster.
     norm_risk = risk / risk_max  # NaN cells stay NaN
 
-    # --- Step 5: Invert and normalise survey cost ----------------------------
-    # survey_cost = 3 - survey  (0=Gap → cost=3, 3=Full → cost=0)
-    # norm_survey_cost in [0, 1]: (3 - survey) / 3
-    survey_cost = (CATZOC_MAX - survey) / float(CATZOC_MAX)
-
-    # The "survey attractiveness" as a cost component is the complement:
-    # lower norm_survey_cost → we want to pass through → subtract from composite.
-    # Using (1 - survey_cost) gives us: Gap→1 (most attractive), Full→0 (least).
-    # But we need cost semantics (low = prefer), so we use survey_cost directly:
-    # Gap → survey_cost = 1.0 (lowest cost component), Full → 0.0 (highest cost).
-    # Wait – this is inverted from what we want.
-    #
-    # We want:
-    #   Gap (CATZOC 0)  → LOW composite cost  → path attracted here
-    #   Full (CATZOC 3) → HIGH composite cost → path avoids here
-    #
-    # survey_cost = (3 - survey) / 3:
-    #   CATZOC 0 → survey_cost = 1.0  (high – would raise composite cost)
-    #   CATZOC 3 → survey_cost = 0.0  (low  – would lower composite cost)
-    #
-    # That is the WRONG direction. We need to invert again:
-    #   survey_component = 1 - survey_cost = survey / 3
-    #   CATZOC 0 → 0.0 (lowest cost → preferred)  ✓
-    #   CATZOC 3 → 1.0 (highest cost → avoided)   ✓
-    #
-    # The formula from the design doc is:
-    #   composite = (1 - w) * norm_risk + w * (1 - norm_survey_cost)
-    # where norm_survey_cost = (3 - survey) / 3.
-    # Substituting: (1 - norm_survey_cost) = 1 - (3-survey)/3 = survey/3
-    # So this equals survey / effective_max — confirmed correct direction.
+    # --- Step 5: Compute survey component -----------------------------------
+    # survey_component = survey / effective_max:
+    #   CATZOC 0 → 0.0 (lowest cost → preferred)
+    #   CATZOC >= effective_max → 1.0 (highest cost → avoided)
     survey_component = survey / float(effective_max)
     # Apply the NaN mask from the risk layer so barrier cells stay NaN.
     survey_component[~np.isfinite(risk)] = np.nan
