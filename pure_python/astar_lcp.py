@@ -205,13 +205,12 @@ def _astar_standard(
                 best[nr, nc] = new_cost
                 parent_dir[nr, nc] = d
                 counter += 1
-                g_stored = float(best[nr, nc])
                 _heappush(
                     pq,
                     (
-                        g_stored + float(h_map[nr, nc]),
+                        new_cost + float(h_map[nr, nc]),
                         counter,
-                        g_stored,
+                        new_cost,
                         nr,
                         nc,
                     ),
@@ -375,13 +374,12 @@ def _astar_with_direction(
                 best[nr, nc, nd_idx] = new_cost
                 parent_d[nr, nc, nd_idx] = d_in
                 counter += 1
-                g_stored = float(best[nr, nc, nd_idx])
                 _heappush(
                     pq,
                     (
-                        g_stored + float(h_map[nr, nc]),
+                        new_cost + float(h_map[nr, nc]),
                         counter,
-                        g_stored,
+                        new_cost,
                         nr,
                         nc,
                         d_out,

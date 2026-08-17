@@ -145,6 +145,65 @@ def _validate_survey_params(
         )
 
 
+def _apply_corridor_mask(
+    risk_raster: np.ndarray,
+    corridor_mask: np.ndarray,
+    start: Tuple[int, int],
+    end: Tuple[int, int],
+) -> np.ndarray:
+    """Apply a boolean corridor mask to the risk raster and validate it.
+
+    Sets cells outside the corridor to NaN (impassable) and verifies that:
+    * the mask contains at least one passable cell,
+    * both start and end lie within the corridor.
+
+    Parameters
+    ----------
+    risk_raster : numpy.ndarray
+        2-D risk array (will be copied before modification).
+    corridor_mask : numpy.ndarray of bool
+        2-D boolean mask; ``True`` = passable, ``False`` = blocked.
+    start : tuple[int, int]
+        ``(row, col)`` of the start cell.
+    end : tuple[int, int]
+        ``(row, col)`` of the end cell.
+
+    Returns
+    -------
+    numpy.ndarray
+        A new float64 copy of *risk_raster* with out-of-corridor cells set to NaN.
+
+    Raises
+    ------
+    ValueError
+        If the mask is empty or start/end are outside the corridor.
+    """
+    risk_raster = np.array(risk_raster, dtype=np.float64)
+    risk_raster[~corridor_mask] = np.nan
+
+    passable_count = int(np.sum(corridor_mask))
+    if passable_count == 0:
+        raise ValueError(
+            "corridor_mask contains no passable cells (all False). "
+            "The corridor polygon does not overlap any raster cells. "
+            "Check that the corridor polygon is in the same coordinate "
+            "system as the risk raster and that it covers the route area."
+        )
+    sr, sc = start
+    er, ec = end
+    if not corridor_mask[sr, sc]:
+        raise ValueError(
+            f"Start point {start} is outside the corridor mask. "
+            "Ensure the corridor polygon covers both the start and end points."
+        )
+    if not corridor_mask[er, ec]:
+        raise ValueError(
+            f"End point {end} is outside the corridor mask. "
+            "Ensure the corridor polygon covers both the start and end points."
+        )
+    return risk_raster
+
+
 # ---------------------------------------------------------------------------
 # Preprocessing
 # ---------------------------------------------------------------------------
@@ -438,30 +497,7 @@ def survey_aware_least_cost_path(
 
     # --- Apply corridor mask (cells outside → impassable) ---------------------
     if corridor_mask is not None:
-        risk_raster = np.array(risk_raster, dtype=np.float64)
-        risk_raster[~corridor_mask] = np.nan
-
-        # Validate that the corridor mask leaves a usable search space.
-        passable_count = int(np.sum(corridor_mask))
-        if passable_count == 0:
-            raise ValueError(
-                "corridor_mask contains no passable cells (all False). "
-                "The corridor polygon does not overlap any raster cells. "
-                "Check that the corridor polygon is in the same coordinate "
-                "system as the risk raster and that it covers the route area."
-            )
-        sr, sc = start
-        er, ec = end
-        if not corridor_mask[sr, sc]:
-            raise ValueError(
-                f"Start point {start} is outside the corridor mask. "
-                "Ensure the corridor polygon covers both the start and end points."
-            )
-        if not corridor_mask[er, ec]:
-            raise ValueError(
-                f"End point {end} is outside the corridor mask. "
-                "Ensure the corridor polygon covers both the start and end points."
-            )
+        risk_raster = _apply_corridor_mask(risk_raster, corridor_mask, start, end)
 
     if progress_callback:
         rows, cols = risk_raster.shape
