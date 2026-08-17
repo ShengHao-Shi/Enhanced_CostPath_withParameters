@@ -131,6 +131,28 @@ def survey_aware_least_cost_path(
         risk_raster = np.array(risk_raster, dtype=np.float64)
         risk_raster[~corridor_mask] = np.nan
 
+        # Validate that the corridor mask leaves a usable search space.
+        passable_count = int(np.sum(corridor_mask))
+        if passable_count == 0:
+            raise ValueError(
+                "corridor_mask contains no passable cells (all False). "
+                "The corridor polygon does not overlap any raster cells. "
+                "Check that the corridor polygon is in the same coordinate "
+                "system as the risk raster and that it covers the route area."
+            )
+        sr, sc = start
+        er, ec = end
+        if not corridor_mask[sr, sc]:
+            raise ValueError(
+                f"Start point {start} is outside the corridor mask. "
+                "Ensure the corridor polygon covers both the start and end points."
+            )
+        if not corridor_mask[er, ec]:
+            raise ValueError(
+                f"End point {end} is outside the corridor mask. "
+                "Ensure the corridor polygon covers both the start and end points."
+            )
+
     if progress_callback:
         rows, cols = risk_raster.shape
         corridor_info = (
