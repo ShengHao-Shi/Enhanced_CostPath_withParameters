@@ -910,3 +910,106 @@ def _smooth_path_nodata_safe(
                 return list(straightened)
 
     return smoothed
+
+
+# ---------------------------------------------------------------------------
+# Connectivity pre-check (shared utility)
+# ---------------------------------------------------------------------------
+
+def _check_connectivity(
+    cost_raster: np.ndarray,
+    start: Tuple[int, int],
+    end: Tuple[int, int],
+    progress_callback=None,
+) -> None:
+    """Raise ValueError immediately if start and end are in disconnected regions.
+
+    This pre-check is called *after* the composite cost raster is built but
+    *before* the graph search starts.  Detecting a disconnected graph upfront
+    converts a multi-hour exhaustive search into a fast failure.
+
+    Strategy (fastest available first):
+    1. ``scipy.ndimage.label`` — C-accelerated connected-component labelling;
+       runs in ~1-2 seconds for any raster size.  Used automatically when
+       scipy is installed.
+    2. Pure-Python BFS using a numpy bool visited array — no heapq overhead,
+       typically 10–30× faster than a failed A*/Dijkstra search for the same
+       raster.
+
+    Parameters
+    ----------
+    cost_raster : numpy.ndarray
+        2-D cost array; cells with NaN or negative values are treated as
+        impassable barriers.
+    start : tuple[int, int]
+        ``(row, col)`` of the start cell.
+    end : tuple[int, int]
+        ``(row, col)`` of the end cell.
+    progress_callback : callable, optional
+        Receives a single string message.
+
+    Raises
+    ------
+    ValueError
+        If no 8-connected path through passable cells links start and end.
+    """
+    from collections import deque
+
+    rows, cols = cost_raster.shape
+    passable = np.isfinite(cost_raster) & (cost_raster >= 0)
+
+    sr, sc = start
+    er, ec = end
+
+    _disconnect_msg = (
+        f"No connected path exists between start {start} and end {end}. "
+        "The two points lie in separate passable regions separated by NaN/Inf "
+        "barriers (e.g., land masses or impassable obstacles). "
+        "Inspect the composite cost raster in ArcGIS to identify the barrier "
+        "and adjust the start/end points or corridor polygon accordingly."
+    )
+
+    # --- Fast path: scipy connected-component labelling (C speed) -------------
+    try:
+        from scipy.ndimage import label as _scipy_label
+        struct = np.ones((3, 3), dtype=bool)   # 8-connectivity
+        labeled, _ = _scipy_label(passable, structure=struct)
+        if labeled[sr, sc] != labeled[er, ec]:
+            raise ValueError(_disconnect_msg)
+        if progress_callback:
+            progress_callback("[Connectivity check] passed (scipy).")
+        return
+    except ImportError:
+        pass
+
+    # --- Fallback: pure-Python BFS (numpy bool array for visited set) ----------
+    # BFS from the *end* cell so that an isolated end is detected instantly.
+    if progress_callback:
+        progress_callback(
+            "[Connectivity check] scipy not available; running BFS pre-check "
+            "(may take ~1-2 min for large rasters)..."
+        )
+
+    visited = np.zeros((rows, cols), dtype=bool)
+    visited[er, ec] = True
+    queue: deque = deque([(er, ec)])
+    _dirs = DIRECTIONS
+
+    while queue:
+        r, c = queue.popleft()
+        if r == sr and c == sc:
+            if progress_callback:
+                progress_callback("[Connectivity check] passed (BFS).")
+            return
+        for dr, dc in _dirs:
+            nr, nc = r + dr, c + dc
+            if (
+                0 <= nr < rows
+                and 0 <= nc < cols
+                and not visited[nr, nc]
+                and passable[nr, nc]
+            ):
+                visited[nr, nc] = True
+                queue.append((nr, nc))
+
+    raise ValueError(_disconnect_msg)

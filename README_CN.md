@@ -21,6 +21,7 @@
 7. [仓库结构](#7-仓库结构)
 8. [运行测试](#8-运行测试)
 9. [许可证](#9-许可证)
+10. [测绘船专用寻路扩展](#10-测绘船专用寻路扩展)
 
 ---
 
@@ -303,10 +304,13 @@ result = cost_aware_least_cost_path(
 Enhanced_CostPath_withParameters/
 ├── arcgis_toolbox_with_progress.pyt   ← ArcGIS Python 工具箱（最新版）
 ├── pure_python/
-│   └── cost_aware_straighten_lcp.py   ← 主算法（纯 Python）
+│   ├── cost_aware_straighten_lcp.py   ← 主算法（纯 Python）
+│   └── survey_aware_lcp.py            ← 测绘船专用路径规划模块
 ├── numba_accelerated/
-│   └── cost_aware_straighten_lcp.py   ← Numba JIT 加速算法
+│   ├── cost_aware_straighten_lcp.py   ← Numba JIT 加速算法
+│   └── survey_aware_lcp.py            ← 测绘船专用模块（Numba 加速版）
 ├── tests/                             ← Pytest 测试套件
+│   └── test_survey_aware_lcp.py       ← 测绘路径规划测试
 ├── docs/
 │   ├── generate_readme_figures.py     ← 重新生成 README 图像的脚本
 │   ├── images/                        ← README 中使用的图像
@@ -352,3 +356,110 @@ MIT
 上述版权声明和本许可声明应包含在本软件的所有副本或大部分内容中。
 本软件按"原样"提供，不附带任何明示或暗示的保证。
 ```
+
+---
+
+## 10. 测绘船专用寻路扩展
+
+### 10.1 背景
+
+标准 ELCP 工具以最小化航行风险为唯一目标。测绘船只有额外需求：
+**在保证安全的前提下，尽量从未测绘区域经过**，以便在往返途中完成水深数据采集。
+
+### 10.2 输入数据
+
+除原有风险栅格外，新工具还需要一个 **CATZOC 覆盖度栅格**，其值域为 0–3：
+
+| 值 | 含义 | 测绘优先级 |
+|---|---|---|
+| 0 | Gap / Void of Soundings（无测深数据） | 最高 |
+| 1 | Minimal Coverage（最低覆盖度） | 高 |
+| 2 | Moderate Coverage（中等覆盖度） | 低 |
+| 3 | Full Bottom Coverage（全覆盖） | 最低 |
+
+CATZOC 栅格须与风险栅格完成投影对齐（相同 cell size，并 snap 到同一参考格网）。
+
+### 10.3 核心算法
+
+工具在调用 Dijkstra 搜索前完成以下预处理：
+
+**步骤 1：安全惩罚（软约束）**
+
+超过 `safety_threshold` 的格元**不会**被设为 NaN，而是对其风险值施加线性惩罚，使路径强烈倾向于绕开危险区域，但在无更安全路线时仍可通过：
+```
+excess         = risk - safety_threshold              （仅对 risk > threshold 的格元）
+penalty_factor = 1 + penalty_multiplier × excess / safety_threshold
+risk_penalised = risk × penalty_factor
+```
+原本为 NaN/Inf 的格元仍为不可通行硬屏障，不受此惩罚机制影响。
+
+**步骤 2：合成代价栅格（软目标）**
+```
+norm_risk         = risk_penalised / max(有效惩罚后 risk 值)
+survey_component  = CATZOC_value / 3       # 0=最低代价，3=最高代价
+composite         = (1 - survey_weight) × norm_risk
+                  + survey_weight × survey_component
+```
+
+这使得 CATZOC 0（未测绘）区域具有最低的 `composite` 代价，路径被吸引经过。
+
+**关键参数：**
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `safety_threshold` | 100 | risk 值软上限；超过此值的格元将被线性惩罚，仍可通行 |
+| `penalty_multiplier` | 10.0 | 惩罚强度；值越大路径越倾向于绕开超阈值格元；设为 0 禁用惩罚 |
+| `survey_weight` | 0.3 | 测绘目标权重（0=纯安全，1=纯测绘价值） |
+| `survey_nodata_as` | `"unsurveyed"` | CATZOC 空值处理方式 |
+
+### 10.4 新增输出字段
+
+| 键 | 说明 |
+|---|---|
+| `survey_coverage_profile` | 路径经过每个格子的 CATZOC 原始值列表 |
+| `survey_score` | 路径中 CATZOC ≤ 1（Gap/Minimal）格子的占比，越高越好 |
+| `above_threshold_count` | 风险值超过 `safety_threshold` 的格子数（已惩罚，但仍可通行）（调试用） |
+| `composite_cost_raster` | 实际输入 Dijkstra 搜索的合成代价栅格 |
+
+### 10.5 使用示例（Python API）
+
+```python
+import numpy as np
+from pure_python.survey_aware_lcp import survey_aware_least_cost_path
+
+# Load your rasters as 2-D NumPy arrays (e.g. via rasterio)
+risk = ...    # float array, higher = more dangerous
+catzoc = ...  # integer array, 0-3
+
+result = survey_aware_least_cost_path(
+    risk,
+    catzoc,
+    start=(0, 0),
+    end=(199, 199),
+    safety_threshold=100,     # cells with risk > 100 are heavily penalised
+    penalty_multiplier=10.0,  # penalty strength (higher = stronger avoidance)
+    survey_weight=0.3,        # 30% survey priority, 70% risk minimisation
+    curvature_factor=0.5,     # smooth turns
+)
+
+print(f"Survey score: {result['survey_score']:.1%} "
+      f"of path through gap/minimal-coverage water")
+print(f"Above threshold (penalised): {result['above_threshold_count']} cells")
+```
+
+### 10.6 ArcGIS 工具箱使用
+
+工具箱中新增两个工具：
+
+- **Survey-Aware LCP (Pure Python)** — 无需额外依赖
+- **Survey-Aware LCP (Numba Accelerated)** — 大栅格高性能版本
+
+参数界面在原有 Cost-Aware LCP 工具基础上新增：
+1. **Survey Coverage Raster** — CATZOC 栅格图层（必填）
+2. **Safety Threshold** — 风险值软上限（默认 100）；超过此值的格元将被惩罚
+3. **Survey Weight** — 测绘权重滑块 0.0–1.0（默认 0.3）
+4. **Survey NODATA Treatment** — 空值处理（`unsurveyed` / `surveyed`）
+5. **Safety Penalty Multiplier** — 惩罚强度（默认 10.0）；值越大对超阈值区域的绕避越强烈
+6. **Maximum Avoidance Level** — 最大回避等级 1–3（默认 3，即仅回避 Class A）；调低至 2 则同时回避 Class A 和 B，调至 1 则回避全部有测绘记录的区域
+7. **Corridor** — 可选多边形图层；路径将被限制在此多边形范围内，范围外的格元视为不可通行
+
