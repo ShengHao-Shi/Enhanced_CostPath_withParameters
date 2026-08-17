@@ -27,6 +27,7 @@ from pure_python.survey_aware_lcp import (
     _validate_survey_params,
     build_composite_cost,
 )
+from pure_python.cost_aware_straighten_lcp import _check_connectivity
 
 
 def survey_aware_astar_least_cost_path(
@@ -166,6 +167,10 @@ def survey_aware_astar_least_cost_path(
             f"[Survey-Aware A*] Composite cost raster built. "
             f"Cells above safety threshold (penalised): {above_threshold_count}"
         )
+
+    # Pre-check connectivity before starting the expensive A* search.
+    # Raises ValueError immediately if start/end are in disconnected regions.
+    _check_connectivity(composite, start, end, progress_callback)
 
     # Delegate to the A* core algorithm.
     result = cost_aware_astar_least_cost_path(

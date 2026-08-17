@@ -331,7 +331,9 @@ class TestEndToEnd:
         # Create a full vertical wall of NaN cells that blocks all paths.
         risk[:, 5] = np.nan
         survey = np.zeros((5, 10))
-        with pytest.raises(RuntimeError, match="No path"):
+        # Connectivity pre-check detects the wall upfront (ValueError) before
+        # the graph search even starts (was RuntimeError in the old code path).
+        with pytest.raises((RuntimeError, ValueError), match="No path|No connected path"):
             survey_aware_least_cost_path(
                 risk, survey, (2, 0), (2, 9), safety_threshold=100
             )
@@ -461,7 +463,7 @@ class TestCorridorMask:
         assert r_no_corridor["path"] == r_full_corridor["path"]
 
     def test_corridor_no_path_raises(self):
-        """A corridor with a full blocking wall must raise RuntimeError."""
+        """A corridor with a full blocking wall must raise an error."""
         risk = np.ones((5, 10)) * 10.0
         survey = np.zeros((5, 10))
 
@@ -469,7 +471,9 @@ class TestCorridorMask:
         corridor = np.ones((5, 10), dtype=bool)
         corridor[:, 5] = False  # block column 5 (complete vertical wall)
 
-        with pytest.raises(RuntimeError, match="No path"):
+        # Connectivity pre-check detects the wall upfront (ValueError) before
+        # the graph search even starts (was RuntimeError in the old code path).
+        with pytest.raises((RuntimeError, ValueError), match="No path|No connected path"):
             survey_aware_least_cost_path(
                 risk, survey, (2, 0), (2, 9), corridor_mask=corridor,
             )

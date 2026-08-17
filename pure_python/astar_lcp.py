@@ -58,7 +58,7 @@ Dependencies: numpy (required).
 
 import heapq
 import math
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -132,8 +132,10 @@ def _astar_standard(
     best[sr, sc] = 0.0
     parent_dir = np.full((rows, cols), -1, dtype=np.int8)
 
-    # Closed set: once a cell is settled its g-value is optimal.
-    closed: Set[Tuple[int, int]] = set()
+    # Closed set: numpy bool array is significantly faster than a Python set of
+    # (row, col) tuples because it avoids tuple allocation and dict hashing on
+    # every membership test and insertion.
+    closed = np.zeros((rows, cols), dtype=bool)
 
     _heappop = heapq.heappop
     _heappush = heapq.heappush
@@ -151,13 +153,13 @@ def _astar_standard(
         _, _, g, r, c = _heappop(pq)
 
         # Skip stale entries or already-settled nodes.
-        if (r, c) in closed:
+        if closed[r, c]:
             continue
         if g > best[r, c]:
             continue
 
         # Settle this node.
-        closed.add((r, c))
+        closed[r, c] = True
 
         if r == er and c == ec:
             break
@@ -178,7 +180,7 @@ def _astar_standard(
             nr, nc = r + dr, c + dc
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
-            if (nr, nc) in closed:
+            if closed[nr, nc]:
                 continue
             cell_val = float(cost_data[nr, nc])
             if not _isfinite(cell_val) or cell_val < 0:
@@ -284,8 +286,10 @@ def _astar_with_direction(
 
     parent_d = np.full((rows, cols, n_states), -1, dtype=np.int8)
 
-    # Closed set over (row, col, direction_index) triples.
-    closed: Set[Tuple[int, int, int]] = set()
+    # Closed set: numpy bool array is significantly faster than a Python set of
+    # (row, col, direction) triples because it avoids tuple allocation and dict
+    # hashing on every membership test and insertion.
+    closed = np.zeros((rows, cols, n_states), dtype=bool)
 
     _heappop = heapq.heappop
     _heappush = heapq.heappush
@@ -308,12 +312,12 @@ def _astar_with_direction(
         _, _, g, r, c, d_in = _heappop(pq)
         d_idx = d_in if d_in >= 0 else NUM_DIRS
 
-        if (r, c, d_idx) in closed:
+        if closed[r, c, d_idx]:
             continue
         if g > best[r, c, d_idx]:
             continue
 
-        closed.add((r, c, d_idx))
+        closed[r, c, d_idx] = True
 
         if r == er and c == ec:
             found = True
@@ -335,7 +339,7 @@ def _astar_with_direction(
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue
             nd_idx = d_out
-            if (nr, nc, nd_idx) in closed:
+            if closed[nr, nc, nd_idx]:
                 continue
             cell_val = float(cost_data[nr, nc])
             if not _isfinite(cell_val) or cell_val < 0:

@@ -30,6 +30,7 @@ from pure_python.survey_aware_lcp import (
     build_composite_cost,
     _compute_survey_stats,
 )
+from pure_python.cost_aware_straighten_lcp import _check_connectivity
 
 
 def survey_aware_least_cost_path(
@@ -177,6 +178,10 @@ def survey_aware_least_cost_path(
             f"[Survey-Aware / Numba] Composite cost raster built. "
             f"Cells above safety threshold (penalised): {above_threshold_count}"
         )
+
+    # Pre-check connectivity before starting the expensive Dijkstra search.
+    # Raises ValueError immediately if start/end are in disconnected regions.
+    _check_connectivity(composite, start, end, progress_callback)
 
     # --- Numba-accelerated Dijkstra search ------------------------------------
     result = _numba_mod.cost_aware_least_cost_path(
